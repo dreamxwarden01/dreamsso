@@ -28,6 +28,8 @@ import { pool } from './db.js';
 import { redis } from './redis.js';
 import { getSigningKey } from './keys.js';
 import { cleanExpiredSessions } from './oidc/sessions.js';
+import crypto from 'node:crypto';
+import { render404Page } from './views.js';
 
 const app = express();
 app.set('trust proxy', 1); // behind Caddy (dev) / OpenResty (prod)
@@ -103,6 +105,18 @@ app.get('/healthz', async (_req, res) => {
     res.json({ status: 'ok', db: 'up', redis: 'up', issuer: config.issuer });
   } catch (err) {
     res.status(503).json({ status: 'degraded', error: (err as Error).message });
+  }
+});
+
+// Catch-all 404 (after every router). Browsers get the styled card; API/other
+// clients get JSON. no-store — it's path-specific, not a cacheable asset.
+app.use(async (req, res) => {
+  res.status(404).setHeader('Cache-Control', 'no-store');
+  if (req.accepts('html')) {
+    const nonce = crypto.randomBytes(16).toString('base64');
+    res.type('html').send(render404Page(nonce, (await getSetting('site_name', 'DreamSSO'))!));
+  } else {
+    res.json({ error: 'not_found' });
   }
 });
 

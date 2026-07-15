@@ -632,6 +632,26 @@ ${baseStyle(nonce)}</head>
 </body></html>`;
 }
 
+// Catch-all 404 for unmatched SSO paths. Same bloom + card shell as the custom
+// challenge page — deliberately brand-less and with NO call-to-action (there's no
+// universally-correct "back" target on the bare IdP host; the account portal is
+// where end users belong, but a stray link shouldn't imply a sign-in flow).
+export function render404Page(nonce: string, siteName = 'DreamSSO'): string {
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page not found · ${esc(siteName)}</title>
+${baseStyle(nonce)}</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Page not found</h1>
+    <p class="sub">The page you&rsquo;re looking for doesn&rsquo;t exist or has moved.</p>
+    <p class="errcode">[404]</p>
+  </div>
+</div>
+</body></html>`;
+}
+
 // OIDC step-up: the SSO-hosted "no accepted verification method" card. Reached when
 // an RP asks for a step-up (e.g. passkey/totp) the user owns none of. The primary
 // button opens the account portal's security pane (a new page — the RP tab stays
