@@ -75,8 +75,8 @@ export async function runFinishTransaction(input: FinishInput): Promise<{ sub: s
     // RBAC catalog (idempotent) — supersedes scripts/seed-rbac.ts.
     for (const r of SYSTEM_ROLES) {
       await c.query(
-        `INSERT INTO org_roles (slug, label, level) VALUES ($1, $2, $3)
-           ON CONFLICT (slug) DO UPDATE SET label = EXCLUDED.label, level = EXCLUDED.level`,
+        `INSERT INTO org_roles (slug, label, level, is_system) VALUES ($1, $2, $3, true)
+           ON CONFLICT (slug) DO UPDATE SET label = EXCLUDED.label, level = EXCLUDED.level, is_system = true`,
         [r.slug, r.label, r.level],
       );
     }

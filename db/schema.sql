@@ -173,6 +173,7 @@ CREATE TABLE org_roles (
     slug       text PRIMARY KEY,                  -- 'org:member','org:staff','org:admin'
     label      text NOT NULL,
     level      int  NOT NULL DEFAULT 100,         -- precedence / display ordering
+    is_system  boolean NOT NULL DEFAULT false,    -- built-in (superadmin/admin/standard_user): no disable/delete
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -201,6 +202,31 @@ CREATE TABLE user_org_roles (
     PRIMARY KEY (user_sub, org_role_slug),
     CONSTRAINT uq_user_org_role UNIQUE (user_sub)  -- one org role per user (tier-based)
 );
+
+CREATE TABLE user_app_role_overrides (            -- user-override layer of: override ?? org default ?? catalog default
+    user_sub    uuid NOT NULL REFERENCES identities(sub) ON DELETE CASCADE,
+    client_id   text NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+    app_role_id int,                              -- NULL = No access; no row = inherit downward
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_sub, client_id)
+);
+
+-- Org audit log. Labels are SNAPSHOTS (display name at the time) so the log stays
+-- readable after renames/deletions; no FKs — log rows outlive users. actor_sub is
+-- NULL for system-originated entries (roles.sync). "Clear" is soft.
+CREATE TABLE org_audit_log (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_sub    uuid,                            -- NULL = system-originated (roles.sync)
+    actor_label  text NOT NULL,
+    target_sub   uuid,
+    target_label text,
+    action       text NOT NULL,                   -- user.role_change | user.password_set | logs.clear | ...
+    detail       jsonb NOT NULL DEFAULT '{}',
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    cleared_at   timestamptz,
+    cleared_by   uuid
+);
+CREATE INDEX idx_org_audit_page ON org_audit_log (created_at DESC, id DESC);
 
 -- SSO/account-portal permissions (Phase A): per-role defaults (seeded from the
 -- code catalog src/rbac/catalog.ts) + per-user overrides. Resolution per (user,key):
