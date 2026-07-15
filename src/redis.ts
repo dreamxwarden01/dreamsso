@@ -1,9 +1,9 @@
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { config } from './config.js';
 
 function makeRedis() {
   const r = new Redis(config.redisUrl);
-  r.on('error', (err) => console.error('Redis error:', err));
+  r.on('error', (err: Error) => console.error('Redis error:', err));
   return r;
 }
 

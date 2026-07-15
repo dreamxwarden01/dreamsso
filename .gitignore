@@ -78,3 +78,6 @@ Thumbs.db
 
 # personal dev-TLS reverse-proxy config (references the wildcard cert)
 Caddyfile
+
+# prod compose (internal topology — macvlan IPs, /srv paths)
+deploy/

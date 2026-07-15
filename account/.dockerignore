@@ -1,0 +1,13 @@
+# build-context excludes for the BFF image (context = account/)
+**/node_modules
+**/dist
+server/scripts
+**/.env
+**/.env.*
+!**/.env.example
+*-client-key.json
+.account-client-key.json
+.mtls.json
+.setup-token
+*.log
+.DS_Store

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import {
   generateKeyPair, exportJWK, exportPKCS8, importPKCS8, calculateJwkThumbprint,
+  type JWK, type JSONWebKeySet,
 } from 'jose';
 import { pool } from './db.js';
 import { config } from './config.js';
@@ -39,7 +40,7 @@ export async function getSigningKey() {
   }
 
   const { publicKey, privateKey } = await generateKeyPair(ALG, { crv: 'Ed25519', extractable: true });
-  const publicJwk = (await exportJWK(publicKey)) as Record<string, unknown>;
+  const publicJwk = (await exportJWK(publicKey)) as unknown as Record<string, unknown>;
   const kid = await calculateJwkThumbprint(publicJwk as any);
   publicJwk.kid = kid;
   publicJwk.alg = ALG;
@@ -63,10 +64,10 @@ export async function getSigningKey() {
 // generous window for in-flight tokens + RP JWKS caches. Rows are kept forever
 // (audit trail); they just drop out of the published set.
 const RETIRED_JWKS_WINDOW = "interval '24 hours'";
-let jwksCache: { value: { keys: Record<string, unknown>[] }; at: number } | null = null;
+let jwksCache: { value: JSONWebKeySet; at: number } | null = null;
 const JWKS_CACHE_MS = 60_000;
 
-export async function getJwks(): Promise<{ keys: Record<string, unknown>[] }> {
+export async function getJwks(): Promise<JSONWebKeySet> {
   if (jwksCache && Date.now() - jwksCache.at < JWKS_CACHE_MS) return jwksCache.value;
   const { rows } = await pool.query(
     `SELECT public_jwk FROM signing_keys
@@ -74,7 +75,7 @@ export async function getJwks(): Promise<{ keys: Record<string, unknown>[] }> {
          OR (status = 'retired' AND retired_at > now() - ${RETIRED_JWKS_WINDOW})
       ORDER BY created_at DESC`,
   );
-  jwksCache = { value: { keys: rows.map((r) => r.public_jwk) }, at: Date.now() };
+  jwksCache = { value: { keys: rows.map((r) => r.public_jwk as JWK) }, at: Date.now() };
   return jwksCache.value;
 }
 
@@ -89,7 +90,7 @@ export function invalidateJwksCache(): void {
 // new key immediately is safe. Returns the new kid.
 export async function rotateSigningKey(): Promise<string> {
   const { publicKey, privateKey } = await generateKeyPair(ALG, { crv: 'Ed25519', extractable: true });
-  const publicJwk = (await exportJWK(publicKey)) as Record<string, unknown>;
+  const publicJwk = (await exportJWK(publicKey)) as unknown as Record<string, unknown>;
   const kid = await calculateJwkThumbprint(publicJwk as any);
   publicJwk.kid = kid;
   publicJwk.alg = ALG;

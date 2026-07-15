@@ -217,14 +217,14 @@ securityRouter.post('/account/mfa/authenticator/confirm', scoped, requirePerm('p
 securityRouter.patch('/account/mfa/authenticator/:id', scoped, requirePerm('profile.security.mfa.totp.rename'), async (req: AuthedRequest, res) => {
   const label = trimLabel(req.body?.label);
   if (!label) return res.status(422).json({ error: 'invalid_label' });
-  const ok = await mfa.renameAuthenticator(req.auth!.sub, req.params.id, label);
+  const ok = await mfa.renameAuthenticator(req.auth!.sub, req.params.id as string, label);
   if (!ok) return res.status(404).json({ error: 'not_found' });
   res.status(204).end();
 });
 
 securityRouter.delete('/account/mfa/authenticator/:id', scoped, requirePerm('profile.security.mfa.totp.remove'), requireSecurityStepup(FACTOR_STEPUP_MAX_S), async (req: AuthedRequest, res) => {
   if (await blocksLastFactor(req.auth!.sub)) return permissionDenied(res, 'profile.security.mfa.disable', 'last_strong_factor');
-  const ok = await mfa.removeAuthenticator(req.auth!.sub, req.params.id);
+  const ok = await mfa.removeAuthenticator(req.auth!.sub, req.params.id as string);
   if (!ok) return res.status(404).json({ error: 'not_found' });
   res.status(204).end();
 });
@@ -266,14 +266,14 @@ securityRouter.post('/account/mfa/passkey/register', scoped, requirePerm('profil
 securityRouter.patch('/account/mfa/passkey/:id', scoped, requirePerm('profile.security.mfa.passkey.rename'), async (req: AuthedRequest, res) => {
   const label = trimLabel(req.body?.label);
   if (!label) return res.status(422).json({ error: 'invalid_label' });
-  const ok = await webauthn.renamePasskey(req.auth!.sub, req.params.id, label);
+  const ok = await webauthn.renamePasskey(req.auth!.sub, req.params.id as string, label);
   if (!ok) return res.status(404).json({ error: 'not_found' });
   res.status(204).end();
 });
 
 securityRouter.delete('/account/mfa/passkey/:id', scoped, requirePerm('profile.security.mfa.passkey.remove'), requireSecurityStepup(FACTOR_STEPUP_MAX_S), async (req: AuthedRequest, res) => {
   if (await blocksLastFactor(req.auth!.sub)) return permissionDenied(res, 'profile.security.mfa.disable', 'last_strong_factor');
-  const ok = await webauthn.removePasskey(req.auth!.sub, req.params.id);
+  const ok = await webauthn.removePasskey(req.auth!.sub, req.params.id as string);
   if (!ok) return res.status(404).json({ error: 'not_found' });
   res.status(204).end();
 });
