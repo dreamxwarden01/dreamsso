@@ -414,11 +414,22 @@ img.pmenu-av { object-fit: cover; display: block; }
 
 /* users pagination */
 .pager { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--mut); }
-.pbtn { padding: 5px 11px; border: 1px solid var(--bd2); border-radius: 8px; background: var(--card); cursor: pointer; font-size: 12.5px; color: var(--tx); }
+.pager-count { margin-right: auto; }
+.pbtn { display: inline-flex; align-items: center; gap: 3px; padding: 5px 10px; border: 1px solid var(--bd2); border-radius: 8px; background: var(--card); cursor: pointer; font-size: 12.5px; color: var(--tx); }
 .pbtn:disabled { opacity: .45; cursor: default; }
+.pbtn svg { width: 15px; height: 15px; }
 .pnum { min-width: 30px; text-align: center; padding: 5px 8px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; background: none; color: var(--tx); font-size: 12.5px; }
 .pnum.on { background: var(--blue); color: #fff; font-weight: 500; }
 .pdots { color: var(--faint); padding: 0 2px; }
+
+/* Mobile pager (≤640px): drop the page-number buttons and the "Prev"/"Next"
+   text labels, leaving the count and two clear, enlarged arrow buttons. */
+@media (max-width: 640px) {
+  .pnum, .pdots { display: none; }
+  .pbtn-lbl { display: none; }
+  .pbtn { padding: 7px 9px; }
+  .pbtn svg { width: 20px; height: 20px; }
+}
 
 /* ── unified challenge modal (ChallengeModal) ───────────────────────────────
    Reuses the signed-out card chrome (.auth-card/.auth-brand/.auth-badge/

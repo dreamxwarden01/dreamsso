@@ -7,6 +7,7 @@ import Modal from '../../components/Modal.jsx';
 import PasswordRules, { passwordValid } from '../../components/PasswordRules.jsx';
 import { Ph } from '../../components/Skeleton.jsx';
 import { initials } from '../../components/Avatar.jsx';
+import Pager from '../../components/Pager.jsx';
 
 // Page size = how many rows fit between the card top and the reserved pager
 // strip, measured from the real DOM (skeleton rows share the live rows'
@@ -115,10 +116,6 @@ export default function OrgUsersPage() {
 
   const total = data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / pageSize));
-  const pageNums = (() => {
-    const set = new Set([1, pages, page, page - 1, page + 1]);
-    return [...set].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
-  })();
 
   const Row = (u) => (
     <div
@@ -181,19 +178,11 @@ export default function OrgUsersPage() {
       )}
 
       {data && total > 0 && (
-        <div className="pager">
-          <span style={{ marginRight: 'auto' }}>
-            {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
-          </span>
-          <button className="pbtn" disabled={page === 1} onClick={() => setPage((p) => p - 1)}>‹ Prev</button>
-          {pageNums.map((n, i) => (
-            <span key={n}>
-              {i > 0 && n - pageNums[i - 1] > 1 && <span className="pdots">…</span>}
-              <button className={'pnum' + (n === page ? ' on' : '')} onClick={() => setPage(n)}>{n}</button>
-            </span>
-          ))}
-          <button className="pbtn" disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next ›</button>
-        </div>
+        <Pager
+          page={page} pages={pages} total={total}
+          from={(page - 1) * pageSize + 1} to={Math.min(page * pageSize, total)}
+          onPage={setPage}
+        />
       )}
 
       {creating && <CreateUserModal onClose={() => setCreating(false)} onCreated={(sub) => nav('/organization/users/' + sub)} />}
