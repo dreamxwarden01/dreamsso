@@ -10,7 +10,7 @@ import { countPasskeys, loginAuthOptions, verifyLoginAssertion } from '../webaut
 import { issueEmailOtp, verifyEmailOtp, maskEmail, otpValidityMinutes } from '../emailOtp.js';
 import { sendEmail } from '../email.js';
 import { renderOtpEmail } from '../emailTemplates.js';
-import { renderLoginPage, renderPasskeyLoginPage, renderChallengePage, renderKmsiPage, renderErrorPage, renderStepupEnrollPage, AUTH_BG_SVG, type ChallengeMethod } from '../views.js';
+import { renderLoginPage, renderPasskeyLoginPage, renderChallengePage, renderKmsiPage, renderErrorPage, renderStepupEnrollPage, AUTH_BG_SVG, FAVICON_SVG, type ChallengeMethod } from '../views.js';
 import { config } from '../config.js';
 import { getSetting } from '../settings.js';
 import { appAccessAllowed } from '../rbac/appRoles.js';
@@ -185,6 +185,15 @@ authorizeRouter.get('/auth-bg.svg', (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'public, max-age=86400');
   res.send(AUTH_BG_SVG);
 });
+
+// Brand favicon (referenced by every page's <head>). Same-origin so it satisfies
+// the strict CSP; a day's cache. Legacy /favicon.ico auto-requests redirect here.
+authorizeRouter.get('/favicon.svg', (_req: Request, res: Response) => {
+  res.type('image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(FAVICON_SVG);
+});
+authorizeRouter.get('/favicon.ico', (_req: Request, res: Response) => res.redirect(301, '/favicon.svg'));
 
 // GET /authorize — validate the OIDC request, open a login transaction, send to /login.
 authorizeRouter.get('/authorize', async (req: Request, res: Response) => {

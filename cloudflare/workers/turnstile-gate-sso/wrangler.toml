@@ -33,3 +33,14 @@ routes = [
   { pattern = "account.dreamxwarden.ca/api/register/start", zone_name = "dreamxwarden.ca" },
   { pattern = "account.dreamxwarden.ca/api/register/complete", zone_name = "dreamxwarden.ca" },
 ]
+
+# Observability — the toml is the source of truth, so this must live here or a
+# future `wrangler deploy` would reset the dashboard toggle. Workers Logs on
+# (with per-invocation logs so `wrangler tail`/dashboard show each request);
+# traces off.
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false

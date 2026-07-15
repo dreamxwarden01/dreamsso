@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import {
-  updateProfile, getStepupStatus,
+  updateProfile, getStepupStatus, getSecurity,
   emailChangeGet, emailChangeStart, emailChangeCheck, emailChangeResend, emailChangeCancel, emailVerifySend,
   usernameChange, usernameChangeCheck, avatarUrl } from '../api.js';
 import Icon from '../components/Icon.jsx';
@@ -385,11 +385,16 @@ export default function ProfilePage() {
   const loadAcct = useCallback(() => emailChangeGet().then(setAcct).catch(() => {}), []);
   useEffect(() => { loadAcct(); }, [loadAcct]);
 
+  // MFA status must reflect ACCOUNT ENROLLMENT (the /api/security toggle), NOT how
+  // this session authenticated — the session amr can be pwd-only even with MFA on
+  // (e.g. signed in before enabling it). null = loading, false = unavailable.
+  const [sec, setSec] = useState(null);
+  useEffect(() => { getSecurity().then(setSec).catch(() => setSec(false)); }, []);
+
   const p = user.profile;
-  const amr = user.security?.amr ?? [];
-  // amr reflects how THIS session authenticated; anything beyond a password means
-  // a second factor was used. (Enrolled-factor management lands in Security.)
-  const mfaOn = amr.some((m) => m && m !== 'pwd');
+  const mfaKnown = !!sec && typeof sec === 'object';
+  const mfaOn = mfaKnown && !!sec.mfa?.enabled;
+  const mfaFactors = mfaKnown ? (sec.mfa?.authenticators?.length ?? 0) + (sec.mfa?.passkeys?.length ?? 0) : 0;
 
   return (
     <>
@@ -434,15 +439,25 @@ export default function ProfilePage() {
 
       <div className="summary">
         <div className="lhs">
-          <Icon name="shield-check" size={23} className={mfaOn ? 'lead-ok' : 'lead-warn'} />
+          <Icon name="shield-check" size={23} className={!mfaKnown ? 'lead-mut' : mfaOn ? 'lead-ok' : 'lead-warn'} />
           <div>
             <p style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>
-              {mfaOn ? 'Multi-factor authentication is on' : 'Multi-factor authentication is off'}
+              {!mfaKnown
+                ? 'Multi-factor authentication'
+                : mfaOn
+                  ? 'Multi-factor authentication is on'
+                  : 'Multi-factor authentication is off'}
             </p>
             <p style={{ margin: '1px 0 0', fontSize: 13, color: 'var(--mut)' }}>
-              {mfaOn
-                ? `Signed in with ${amr.join(', ')}`
-                : 'Add a second factor to better protect your account'}
+              {sec === null
+                ? 'Checking…'
+                : !mfaKnown
+                  ? 'Review your settings in Security'
+                  : mfaOn
+                    ? mfaFactors
+                      ? `Protected with ${mfaFactors} factor${mfaFactors === 1 ? '' : 's'}`
+                      : 'Your account is protected with a second factor'
+                    : 'Add a second factor to better protect your account'}
             </p>
           </div>
         </div>

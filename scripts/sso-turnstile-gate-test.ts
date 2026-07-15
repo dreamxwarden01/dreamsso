@@ -4,7 +4,7 @@
 //   the WORKER driven in-process end-to-end: real siteverify (always-pass test
 //     secret), token + smuggled x-gate-* stripped, Ed25519 assertion signed,
 //     forwarded to the real BFF -> 204
-//   worker: missing token -> 403, non-JSON -> 403, non-POST passes through
+//   worker: missing token -> 403, non-JSON -> 403, non-POST -> 405 (Allow: POST)
 //   hand-signed assertions at the BFF: valid -> 204; tampered body / wrong
 //     path / expired / stale iat / wrong key -> 403
 //   no signing key configured -> assertion path skipped (token-only)
@@ -161,9 +161,11 @@ try {
   }), env)) as unknown as Response;
   ok(r.status === 403, '3b. worker: non-JSON body -> 403');
 
-  // 3c. non-POST passes through untouched
-  r = (await worker.fetch(new Request(PORTAL + '/healthz'), env)) as unknown as Response;
-  ok(r.status === 200 && (await r.json()).status === 'ok', '3c. worker: GET passes through to origin');
+  // 3c. non-POST is rejected at the edge (these routes are POST-only) — 405 with
+  // Allow: POST, never forwarded to the origin.
+  r = (await worker.fetch(new Request(PORTAL + PATH, { method: 'GET' }), env)) as unknown as Response;
+  ok(r.status === 405 && r.headers.get('Allow') === 'POST' && (await r.json()).error === 'method_not_allowed',
+     '3c. worker: non-POST -> 405 (Allow: POST)');
 
   // 3d. misconfigured env fails loud
   r = (await worker.fetch(new Request(PORTAL + PATH, { method: 'POST', body: BODY }),

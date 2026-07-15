@@ -90,10 +90,14 @@ export default {
       });
     }
 
-    // Routes are method-agnostic; anything but POST passes through (with the
-    // x-gate-* strip, so no method can smuggle a signature).
+    // These three routes are POST-only (the only method that does anything).
+    // Reject everything else at the edge with 405 — no origin round-trip for junk
+    // methods, and no non-POST can slip an x-gate-* header past the worker.
     if (request.method !== 'POST') {
-      return fetch(new Request(request, { headers: forwardHeaders(request) }));
+      return new Response(JSON.stringify({ error: 'method_not_allowed' }), {
+        status: 405,
+        headers: { ...FAILURE_HEADERS, Allow: 'POST' },
+      });
     }
 
     let body;

@@ -122,7 +122,25 @@ app.use(backchannelRouter); // before the SPA fallback (POST, no /api or /auth p
 
 // --- serve the built SPA (client/dist) with a client-side-routing fallback ---
 const indexHtml = path.join(config.spaDist, 'index.html');
-app.use(express.static(config.spaDist, { index: false }));
+
+// Legacy /favicon.ico (auto-requested by browsers, bookmarks, tab restore) -> the
+// SVG icon so it never 404s; the 301 is itself cacheable.
+app.get('/favicon.ico', (_req, res) => res.redirect(301, '/favicon.svg'));
+
+app.use(express.static(config.spaDist, {
+  index: false,
+  setHeaders: (res, filePath) => {
+    // Vite content-hashes everything under /assets, so those bundles can cache
+    // forever; unhashed root files (favicon.svg, auth-bg.svg) get a day so an
+    // update still propagates.
+    res.setHeader(
+      'Cache-Control',
+      filePath.includes(`${path.sep}assets${path.sep}`)
+        ? 'public, max-age=31536000, immutable'
+        : 'public, max-age=86400',
+    );
+  },
+}));
 
 // Express 5: no string '*' route — a final middleware handles the SPA fallback.
 app.use((req, res) => {
@@ -135,7 +153,9 @@ app.use((req, res) => {
   if ((req.path.split('/').pop() || '').includes('.')) {
     return res.status(404).json({ error: 'not_found' });
   }
-  if (fs.existsSync(indexHtml)) return res.sendFile(indexHtml);
+  // The shell references content-hashed bundles, so a short cache is safe and
+  // lets a deploy roll out within ~2 min without a hard reload.
+  if (fs.existsSync(indexHtml)) return res.sendFile(indexHtml, { maxAge: 120_000 });
   res
     .status(200)
     .type('html')
