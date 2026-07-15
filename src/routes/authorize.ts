@@ -11,6 +11,7 @@ import { issueEmailOtp, verifyEmailOtp, maskEmail, otpValidityMinutes } from '..
 import { sendEmail } from '../email.js';
 import { renderOtpEmail } from '../emailTemplates.js';
 import { renderLoginPage, renderPasskeyLoginPage, renderChallengePage, renderKmsiPage, renderErrorPage, renderStepupEnrollPage, AUTH_BG_SVG, FAVICON_SVG, type ChallengeMethod } from '../views.js';
+import { CHALLENGE_HTML } from '../challengePage.js';
 import { config } from '../config.js';
 import { getSetting } from '../settings.js';
 import { appAccessAllowed } from '../rbac/appRoles.js';
@@ -194,6 +195,16 @@ authorizeRouter.get('/favicon.svg', (_req: Request, res: Response) => {
   res.send(FAVICON_SVG);
 });
 authorizeRouter.get('/favicon.ico', (_req: Request, res: Response) => res.redirect(301, '/favicon.svg'));
+
+// Zone-level Cloudflare custom challenge page. CF fetches + stores this and
+// serves its own copy from the edge, so runtime has no origin dependency (all
+// inlined); the cache header just governs CF's fetch. Not matched by the login
+// challenge rule, so CF can fetch it without being challenged.
+authorizeRouter.get('/challenge.html', (_req: Request, res: Response) => {
+  res.type('html');
+  res.setHeader('Cache-Control', 'public, max-age=120');
+  res.send(CHALLENGE_HTML);
+});
 
 // GET /authorize — validate the OIDC request, open a login transaction, send to /login.
 authorizeRouter.get('/authorize', async (req: Request, res: Response) => {

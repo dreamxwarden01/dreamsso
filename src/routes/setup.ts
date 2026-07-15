@@ -22,7 +22,7 @@ const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
 export const setupRouter = express.Router();
 
 // Paths that stay reachable while setup is incomplete (besides /setup*).
-const OPEN_PATHS = new Set(['/healthz', '/auth-bg.svg', '/favicon.svg', '/favicon.ico']);
+const OPEN_PATHS = new Set(['/healthz', '/auth-bg.svg', '/favicon.svg', '/favicon.ico', '/challenge.html']);
 
 // The neutral pre-setup response for anything not explicitly allowed — the same
 // page an attacker sees at /setup without a token, so the wizard is never
