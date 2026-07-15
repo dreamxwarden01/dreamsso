@@ -20,10 +20,14 @@ const USERNAME_RE = /^[A-Za-z0-9_-]{3,20}$/;
 // POST /api/register/start {email, code?, turnstile_token?}
 registerRouter.post('/api/register/start', async (req: Request, res: Response) => {
   try {
+    // Turnstile FIRST — single-use token, consumed on every request incl. the
+    // 400/422 paths, so the contract matches the edge worker and the client can
+    // reset the widget after any error. Then session, then code/email.
+    if (!(await enforceTurnstileGate(req, res))) return;
+
     if (await getSession(req.cookies?.[SESSION_COOKIE])) {
       return res.status(400).json({ error: 'already_authenticated' });
     }
-    if (!(await enforceTurnstileGate(req, res))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const email = qstr(body.email).trim();
@@ -76,10 +80,13 @@ registerRouter.post('/api/register/check-username', async (req: Request, res: Re
 // answers {complete_url} for the /welcome sign-in hop.
 registerRouter.post('/api/register/complete', async (req: Request, res: Response) => {
   try {
+    // Turnstile FIRST — single-use token, consumed on every request (matches the
+    // edge worker) so the client resets the widget after any error.
+    if (!(await enforceTurnstileGate(req, res))) return;
+
     if (await getSession(req.cookies?.[SESSION_COOKIE])) {
       return res.status(400).json({ error: 'already_authenticated' });
     }
-    if (!(await enforceTurnstileGate(req, res))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const password = qstr(body.password);

@@ -23,3 +23,13 @@ name = "turnstile-gate-sso"
 main = "src/index.js"
 compatibility_date = "2026-06-16"
 workers_dev = false
+
+# Only the three token-bearing public POSTs. The reset-token steps (validate /
+# confirm / passkey-options) and register validate/check-username carry NO
+# turnstile_token, so routing them here would 403 them (the worker requires a
+# token on POST). Keep this list in sync with enforceTurnstileGate() callers.
+routes = [
+  { pattern = "account.dreamxwarden.ca/api/reset/request", zone_name = "dreamxwarden.ca" },
+  { pattern = "account.dreamxwarden.ca/api/register/start", zone_name = "dreamxwarden.ca" },
+  { pattern = "account.dreamxwarden.ca/api/register/complete", zone_name = "dreamxwarden.ca" },
+]

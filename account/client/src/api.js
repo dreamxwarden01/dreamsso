@@ -115,13 +115,28 @@ export const terminateOtherSessions = () =>
 
 // --- password reset (public pages — NO 401-redirect wrapper: these endpoints
 // never require a session, and a visitor on /forgot must not get bounced) ---
-async function reqPublic(path, body) {
-  const r = await fetch(path, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+// Turnstile-gated submits pass a timeout so a stalled request GIVES UP (the
+// button can't lock forever) instead of hanging — the caller then unlocks and
+// re-solves the widget for a fresh token.
+const SUBMIT_TIMEOUT_MS = 5000;
+async function reqPublic(path, body, { timeoutMs } = {}) {
+  let r;
+  try {
+    r = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+    });
+  } catch (err) {
+    // No HTTP response: timed out (AbortSignal.timeout -> TimeoutError) or a
+    // network failure. Normalize so pages treat it like any other error.
+    const e = new Error(err?.name === 'TimeoutError' ? 'timeout' : 'network');
+    e.status = 0;
+    e.code = e.message;
+    throw e;
+  }
   const data = r.status === 204 ? null : await r.json().catch(() => null);
   if (!r.ok) {
     const e = new Error((data && data.error) || 'http_' + r.status);
@@ -133,7 +148,7 @@ async function reqPublic(path, body) {
   return data;
 }
 export const resetRequest = (identifier, turnstileToken) =>
-  reqPublic('/api/reset/request', { identifier, turnstile_token: turnstileToken ?? undefined });
+  reqPublic('/api/reset/request', { identifier, turnstile_token: turnstileToken ?? undefined }, { timeoutMs: SUBMIT_TIMEOUT_MS });
 export const resetValidate = (token) => reqPublic('/api/reset/validate', { token });
 export const resetPasskeyOptions = (token) => reqPublic('/api/reset/passkey-options', { token });
 // credential travels as a JSON string (the SSO parses it server-side).
@@ -154,11 +169,11 @@ export const verifyEmail = (token) => reqPublic('/api/verify-email', { token });
 
 // --- registration (public, invitation-gated upstream) ---
 export const registerStart = (email, code, turnstileToken) =>
-  reqPublic('/api/register/start', { email, code: code || undefined, turnstile_token: turnstileToken ?? undefined });
+  reqPublic('/api/register/start', { email, code: code || undefined, turnstile_token: turnstileToken ?? undefined }, { timeoutMs: SUBMIT_TIMEOUT_MS });
 export const registerValidate = (email, token) => reqPublic('/api/register/validate', { email, token });
 export const registerCheckUsername = (email, token, username) =>
   reqPublic('/api/register/check-username', { email, token, username });
-export const registerComplete = (body) => reqPublic('/api/register/complete', body);
+export const registerComplete = (body) => reqPublic('/api/register/complete', body, { timeoutMs: SUBMIT_TIMEOUT_MS });
 
 // --- profile picture ---
 export const avatarUrl = (f) => '/api/avatar/' + encodeURIComponent(f);

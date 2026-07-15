@@ -58,14 +58,17 @@ export default function RegisterStartPage() {
       setSentTo(email.trim().toLowerCase());
       setCooldown(d?.resend_backoff ?? 60);
       setPhase('sent');
+      // Success navigates to the sent card (whose resend widget only mounts once
+      // the cooldown ends) — clear the stale token but don't re-challenge here.
       setTurnstileToken(null);
-      resetRef.current?.();
     } catch (err) {
       const fieldErrs = err.data?.errors || {};
+      // Turnstile is verified first, so any non-2xx means the single-use token is
+      // spent — reset the widget so a retry re-solves for a fresh one.
+      setTurnstileToken(null);
+      resetRef.current?.();
       if (err.status === 403 && err.code === 'turnstile_failed') {
         setFormErr({ msg: 'Human verification failed — try again.', code: err.code });
-        setTurnstileToken(null);
-        resetRef.current?.();
         if (!turnstileSiteKey) refreshSite();
       } else if (err.status === 403 && err.code === 'registration_closed') {
         setFormErr({ msg: 'Registration is currently closed.', code: err.code });
@@ -94,10 +97,10 @@ export default function RegisterStartPage() {
             : 'We couldn’t send the email — try again.',
           code: err.code,
         });
+      } else if (err.code === 'timeout') {
+        setFormErr({ msg: 'That took too long — try again.', code: 'timeout' });
       } else {
         setFormErr({ msg: 'Something went wrong — try again.', code: err.code || 'http_' + (err.status ?? 'network') });
-        setTurnstileToken(null);
-        resetRef.current?.();
       }
     } finally {
       setSubmitting(false);
@@ -127,12 +130,16 @@ export default function RegisterStartPage() {
           and password. The link expires in 30 minutes.
         </p>
         {formErr && <div className="auth-err">{formErr.msg} [{formErr.code}]</div>}
-        <Turnstile
-          onToken={setTurnstileToken}
-          onExpire={() => setTurnstileToken(null)}
-          onError={() => setTurnstileToken(null)}
-          resetRef={resetRef}
-        />
+        {/* Only mount the widget once the resend button is actually clickable —
+            no point solving a challenge (or letting one expire) during the wait. */}
+        {cooldown <= 0 && (
+          <Turnstile
+            onToken={setTurnstileToken}
+            onExpire={() => setTurnstileToken(null)}
+            onError={() => setTurnstileToken(null)}
+            resetRef={resetRef}
+          />
+        )}
         <button
           type="button" className="auth-btn"
           disabled={cooldown > 0 || submitting || (!!turnstileSiteKey && !turnstileToken)}

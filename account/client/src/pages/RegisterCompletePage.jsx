@@ -81,10 +81,12 @@ export default function RegisterCompletePage() {
       window.location.replace(d.complete_url);
     } catch (err) {
       const errs = err.data?.errors || {};
+      // Turnstile is verified first, so any non-2xx means the single-use token is
+      // spent — reset the widget so a retry re-solves for a fresh one.
+      setTurnstileToken(null);
+      resetRef.current?.();
       if (err.status === 403 && err.code === 'turnstile_failed') {
         setFormErr({ msg: 'Human verification failed — try again.', code: err.code });
-        setTurnstileToken(null);
-        resetRef.current?.();
         if (!turnstileSiteKey) refreshSite();
       } else if (err.status === 403 && err.code === 'registration_closed') {
         setPhase('closed');
@@ -98,10 +100,10 @@ export default function RegisterCompletePage() {
         if (errs.password) setPwBad(true);
         if (errs.email) setFormErr({ msg: 'This email address is already registered.', code: 'email_taken' });
         if (errs.confirm) setCfErr('Passwords do not match.');
+      } else if (err.code === 'timeout') {
+        setFormErr({ msg: 'That took too long — try again.', code: 'timeout' });
       } else {
         setFormErr({ msg: 'Something went wrong — try again.', code: err.code || 'http_' + (err.status ?? 'network') });
-        setTurnstileToken(null);
-        resetRef.current?.();
       }
     } finally {
       setBusy(false);

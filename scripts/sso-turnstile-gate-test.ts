@@ -75,7 +75,10 @@ async function signAssertion(privJwk: JWK, over: {
 }
 
 // --- snapshot settings rows verbatim ---
-const TOUCHED = ['turnstile_site_key', 'turnstile_secret_key', 'gate_signing_public_jwk'];
+// stepup_admin_required is included so the run can lower the admin step-up door
+// (added after this test was first written — it now 403s /admin/api mutations
+// like generate-gate-key with step_up_required) and restore it afterward.
+const TOUCHED = ['turnstile_site_key', 'turnstile_secret_key', 'gate_signing_public_jwk', 'stepup_admin_required'];
 const { rows: origRows } = await pool.query<{ key: string; value: string }>(
   'SELECT key, value FROM settings WHERE key = ANY($1)', [TOUCHED]);
 const setDb = async (k: string, v: string | null) => {
@@ -87,6 +90,12 @@ await pool.query(
   `INSERT INTO user_permission_overrides (user_sub, perm_key, effect) VALUES ($1, 'org.siteSettings.sso', 'grant')
      ON CONFLICT (user_sub, perm_key) DO UPDATE SET effect = 'grant'`, [sub]);
 const hadOverride = false; // test-created; removed in finally
+
+// Lower the admin step-up door for the run so generate-gate-key (a POST under
+// /admin/api) isn't 403'd with step_up_required. Direct DB write, so wait out
+// the SSO process's 5s getSetting cache before the first admin mutation.
+await setDb('stepup_admin_required', 'false');
+await sleep(6_000);
 
 try {
   // --- admin login (tester + temporary grant) ---

@@ -41,10 +41,13 @@ export default function ForgotPage() {
       setSentId(id.includes('@') ? id.toLowerCase() : id);
       setPhase('sent');
     } catch (err) {
+      // Turnstile is verified first (edge worker or origin), so ANY non-2xx here
+      // means the single-use token was already spent. Always reset the widget so
+      // a retry carries a fresh token — the button stays greyed until it re-solves.
+      setTurnstileToken(null);
+      resetRef.current?.();
       if (err.status === 403 && err.code === 'turnstile_failed') {
         setFormErr({ msg: 'Human verification failed — try again.', code: err.code });
-        setTurnstileToken(null);
-        resetRef.current?.();
         // The server enforces Turnstile but we cached it as off — re-fetch so
         // the widget mounts on the next render (videosite's stale-key path).
         if (!turnstileSiteKey) refreshSite();
@@ -54,10 +57,10 @@ export default function ForgotPage() {
         setFormErr({ msg: "You're already signed in — change your password from Security instead.", code: err.code });
       } else if (err.status === 503 && err.code === 'email_not_configured') {
         setFormErr({ msg: 'Email sending isn’t set up yet — contact your administrator.', code: err.code });
+      } else if (err.code === 'timeout') {
+        setFormErr({ msg: 'That took too long — try again.', code: 'timeout' });
       } else {
         setFormErr({ msg: 'Something went wrong — try again.', code: err.code || 'http_' + (err.status ?? 'network') });
-        setTurnstileToken(null);
-        resetRef.current?.();
       }
     } finally {
       setSubmitting(false);

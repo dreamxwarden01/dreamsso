@@ -159,6 +159,13 @@ const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
 // real work asynchronously); only "email isn't configured" surfaces (503).
 resetRouter.post('/api/reset/request', async (req: Request, res: Response) => {
   try {
+    // Turnstile FIRST. The token is single-use, and when the edge worker is
+    // deployed it's already verified + stripped upstream; verifying here before
+    // the session/format checks makes the token get consumed on EVERY request
+    // (incl. the 400/422 paths), so the contract is identical worker-or-not and
+    // the client can safely reset the widget after any error.
+    if (!(await enforceTurnstileGate(req, res))) return;
+
     // Signed-in users change their password in Security instead (parity with
     // videosite's already-logged-in check).
     if (await getSession(req.cookies?.[SESSION_COOKIE])) {
@@ -167,8 +174,6 @@ resetRouter.post('/api/reset/request', async (req: Request, res: Response) => {
 
     const identifier = qstr((req.body ?? {}).identifier).trim();
     if (!identifierOk(identifier)) return res.status(422).json({ error: 'invalid_identifier' });
-
-    if (!(await enforceTurnstileGate(req, res))) return;
 
     await mirror(res, await s2sPost('/internal/reset/request', { identifier }));
   } catch (e) {
