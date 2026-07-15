@@ -1,0 +1,25 @@
+# turnstile-gate-sso — edge Turnstile verification for the DreamSSO account
+# portal's public flows (password reset now, registration later).
+#
+# DO NOT deploy against dev: the dev origins are local DNS records, not behind
+# Cloudflare, so worker routes can't attach. Prod-only. The origin is designed
+# to work with OR without this worker (token -> origin siteverify; no token ->
+# x-gate-assertion), so deploy order doesn't matter. The only invalid state is
+# "Turnstile unconfigured at origin + worker still deployed" (no widget -> no
+# token -> the worker 403s everything): undeploy the worker when unconfiguring.
+#
+# Secrets (wrangler secret put):
+#   TURNSTILE_SECRET_KEY  — the Cloudflare Turnstile secret key (same value as
+#                           the sealed admin setting)
+#   GATE_SIGNING_KEY      — the PRIVATE Ed25519 JWK from admin Settings ->
+#                           "Generate signing key" (shown once; paste verbatim)
+#
+# Routes are attached at deploy time on the production zone, e.g.:
+#   routes = [
+#     { pattern = "account.dreamxwarden.ca/api/reset/request", zone_name = "dreamxwarden.ca" },
+#   ]
+
+name = "turnstile-gate-sso"
+main = "src/index.js"
+compatibility_date = "2026-06-16"
+workers_dev = false

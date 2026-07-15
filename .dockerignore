@@ -1,0 +1,55 @@
+# Build-context excludes for a future SSO/BFF image build. Keeps secrets and bulk
+# out of the image and the layer cache. Mirrors .gitignore + build-context concerns.
+
+# vcs / editor / OS
+.git
+.gitignore
+.dockerignore
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# dependencies & build output (rebuilt in the image)
+node_modules/
+dist/
+build/
+account/client/dist/
+admin-ui/dist/
+*.tsbuildinfo
+
+# SECRETS — never bake into an image
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.cert
+*.csr
+*.p12
+*.pfx
+*.der
+*.bak
+*-client-key.json
+.mtls.json
+.setup-token
+.install-token
+
+# real user data / dumps / runtime state
+users.ndjson
+*.ndjson
+sub_map.csv
+*.sql.gz
+videosite-dump*
+data/
+
+# separate projects / not needed in the image
+videosite-local/
+migrate/
+dev-rp/
+docs/
+scripts/
+*.md
+*.log

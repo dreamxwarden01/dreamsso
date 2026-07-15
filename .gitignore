@@ -1,0 +1,80 @@
+# ─── dependencies & build output ────────────────────────────────────────────
+node_modules/
+dist/
+build/
+account/client/dist/
+admin-ui/dist/
+*.tsbuildinfo
+
+# ─── SECRETS: env files (any depth) — keep only the .example templates ───────
+.env
+.env.*
+!.env.example
+
+# ─── SECRETS: private keys, certs, client keys, mTLS identity ────────────────
+# The dev wildcard cert is a real, publicly-trusted *.dreamxwarden.ca cert — its
+# private key would let anyone impersonate every subdomain. Never commit any of it.
+STAR.dreamxwarden.ca.crt
+STAR.dreamxwarden.ca.key
+*.key
+*.pem
+*.crt
+*.cert
+*.csr
+*.p12
+*.pfx
+*.der
+*.bak
+.videosite-client-key.json
+account/server/.account-client-key.json
+*-client-key.json
+.mtls.json
+*.mtls.json
+
+# ─── first-run installer tokens (unlock /setup and /install) ─────────────────
+.setup-token
+.install-token
+
+# ─── migration artifacts: REAL user data (usernames, emails, password hashes,
+#     subs) and full DB dumps. Never commit. ───────────────────────────────────
+users.ndjson
+*.ndjson
+sub_map.csv
+*.sql.gz
+videosite-dump*
+
+# ─── runtime data (uploaded avatars, etc.) ───────────────────────────────────
+data/
+
+# ─── the videosite fork is a separate project / repo (dreamxwarden01/videosite)
+videosite-local/
+
+# ─── PUBLIC REPO: keep only the API schemas from docs/; the migration plan,
+#     security-design docs, internal roadmap/decisions, and UI mockups stay in the
+#     private working copy. (docs/security/openapi-*.yaml ARE kept.) ─────────────
+docs/ROADMAP.md
+docs/decisions.md
+docs/prod-migration-plan.md
+docs/videosite-oidc-integration.md
+docs/*.html
+docs/security/s2s-endpoints.md
+docs/security/api-shield-coarse-contract.md
+RBAC model draft.xlsx
+
+# ─── migration tooling: this one file embeds real dev user subs ──────────────
+migrate/rewrite-user-id-to-sub.sql
+
+# ─── captured reference logs (may hold cookies / tokens) ─────────────────────
+cas.sfu.ca.txt*
+failed_login.txt*
+*.log
+
+# ─── OS / editor junk ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# personal dev-TLS reverse-proxy config (references the wildcard cert)
+Caddyfile

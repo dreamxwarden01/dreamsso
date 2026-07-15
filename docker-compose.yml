@@ -1,0 +1,88 @@
+# DreamSSO — local dev datastores (run under OrbStack).
+# Postgres auto-applies db/schema.sql on FIRST init only; `docker compose down -v` to reset.
+# The SSO app + Caddy (TLS via the *.dreamxwarden.ca wildcard) get added at the
+# endpoint-scaffolding step — there's nothing to serve yet.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dreamsso}
+      POSTGRES_USER: ${POSTGRES_USER:-dreamsso}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dreamsso}
+    ports:
+      - "127.0.0.1:5432:5432"          # localhost only — the migration runs on the Mac host
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dreamsso} -d ${POSTGRES_DB:-dreamsso}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine                # matches prod (videosite-cache)
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+
+  # TLS termination for local dev using the real *.dreamxwarden.ca wildcard cert.
+  # Proxies https://sso-dev.dreamxwarden.ca -> the SSO app running on the host (:3000).
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./STAR.dreamxwarden.ca.crt:/certs/STAR.dreamxwarden.ca.crt:ro
+      - ./STAR.dreamxwarden.ca.key:/certs/STAR.dreamxwarden.ca.key:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- local videosite (login-first integration test) ---
+  videosite-db:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: videosite
+      MARIADB_USER: videosite
+      MARIADB_PASSWORD: videosite
+    volumes:
+      - videositedb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  videosite-web:
+    # Local-first OIDC work: build the videosite-local/ source copy as a NATIVE
+    # arm64 image (no Rosetta) instead of pulling the amd64 prod image. To revert
+    # to the prebuilt image, restore:
+    #   image: ghcr.io/dreamxwarden01/videosite-web:latest
+    #   platform: linux/amd64
+    build:
+      context: ./videosite-local
+      dockerfile: Dockerfile
+    image: videosite-web:local
+    env_file: ./videosite-local/.env
+    volumes:
+      # videosite's private_key_jwt signing key (public half served at its own
+      # /.well-known/jwks.json). WRITABLE: the admin "rotate client key" action
+      # rewrites it in place (host file — survives rebuilds).
+      - ./.videosite-client-key.json:/run/secrets/videosite-client-key.json
+    extra_hosts:
+      # Back-channel (/token,/jwks,/userinfo) reaches the SSO through Caddy on the host.
+      - "sso-dev.dreamxwarden.ca:host-gateway"
+    depends_on:
+      videosite-db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  videositedb:

@@ -1,0 +1,541 @@
+# ⚠️ DRAFT — auto-generated from a route sweep (2026-07-13). Verify request/response
+# shapes against source before uploading to Cloudflare API Shield. Only relevant for
+# endpoints that stay CF-fronted (see docs/security/s2s-endpoints.md, Decision A).
+
+openapi: 3.1.0
+info:
+  title: DreamSSO service-to-service API (mTLS / API Shield)
+  version: "2026-07-13"
+  description: >
+    Server-to-server endpoints on sso.dreamxwarden.ca that sit behind the CF
+    mTLS require-cert set: OIDC token/userinfo, the RP event channel, and the
+    account-portal /internal/* family. Client mTLS is terminated and verified at
+    the Cloudflare edge (cf.tls_client_auth.cert_verified); origins never see the
+    cert. App-layer auth is private_key_jwt (RFC 7523), Bearer access token, or a
+    signed event JWT as noted per operation. /account/* resource routes are in the
+    require-cert set but out of scope for schema validation here.
+servers:
+  - url: https://sso.dreamxwarden.ca
+security:
+  - edgeMutualTLS: []
+tags:
+  - name: oidc
+  - name: events
+  - name: internal
+components:
+  securitySchemes:
+    edgeMutualTLS:
+      type: mutualTLS
+      description: >
+        Client certificate presented by the calling backend and verified at the
+        Cloudflare edge. Callers use a CF-managed client cert (videosite) or a
+        homelab-CA cert uploaded via BYOCA (account BFF, once provisioned).
+    privateKeyJwt:
+      type: apiKey
+      in: cookie
+      name: client_assertion
+      description: >
+        RFC 7523 private_key_jwt in the form body (not really a cookie; modeled as
+        apiKey for tooling). client_assertion_type + client_assertion fields; iss=sub=client_id,
+        aud in [issuer, issuer/token], signed by the client's registered key (jwks_uri/jwks).
+    bearerAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: SSO access token, aud=issuer, carries space-delimited scope.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        error_description: { type: string }
+      required: [error]
+    ClientAssertion:
+      type: object
+      properties:
+        client_assertion_type:
+          type: string
+          enum: ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"]
+        client_assertion: { type: string, description: Signed JWT }
+      required: [client_assertion_type, client_assertion]
+    Challenge:
+      type: object
+      nullable: true
+      properties:
+        methods:
+          type: array
+          items: { type: string, enum: [passkey, totp] }
+        label: { type: string }
+      required: [methods, label]
+paths:
+  /token:
+    post:
+      operationId: oidcToken
+      tags: [oidc]
+      summary: OIDC token endpoint (authorization_code + private_key_jwt + PKCE)
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                grant_type: { type: string, enum: [authorization_code] }
+                client_assertion_type:
+                  type: string
+                  enum: ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"]
+                client_assertion: { type: string }
+                code: { type: string }
+                redirect_uri: { type: string, format: uri }
+                code_verifier: { type: string }
+              required: [grant_type, client_assertion_type, client_assertion, code, redirect_uri, code_verifier]
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, enum: [Bearer] }
+                  expires_in: { type: integer, example: 900 }
+                  id_token: { type: string }
+                  scope: { type: string }
+                required: [access_token, token_type, expires_in, id_token, scope]
+        "400": { description: Bad grant/PKCE, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: Client auth failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /userinfo:
+    get:
+      operationId: oidcUserinfo
+      tags: [oidc]
+      summary: OIDC UserInfo
+      security: [ { edgeMutualTLS: [], bearerAccessToken: [] } ]
+      responses:
+        "200":
+          description: Claims filtered by token scope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sub: { type: string }
+                  name: { type: string }
+                  preferred_username: { type: string }
+                  picture: { type: string, description: avatar file name, not a URL }
+                  email: { type: string }
+                  email_verified: { type: boolean }
+                required: [sub]
+        "401":
+          description: Invalid/missing bearer
+          headers:
+            WWW-Authenticate: { schema: { type: string } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /backchannel/events:
+    post:
+      operationId: inboundEvents
+      tags: [events]
+      summary: RP -> SSO event channel (roles.sync, ...)
+      description: >
+        event_token is a JWT signed with the RP's registered client key
+        (iss=client_id, aud=issuer, iat, jti, events:[{id,type,payload}]).
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                event_token: { type: string, maxLength: 262144 }
+              required: [event_token]
+      responses:
+        "204": { description: Accepted (all events processed/deduped) }
+        "400": { description: missing/malformed token or invalid events, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: unknown_client / invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: processing_failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/avatar:
+    post:
+      operationId: internalAvatarFetch
+      tags: [internal]
+      summary: S2S avatar-bytes fetch for RP backends
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties: { file: { type: string } }
+                  required: [file]
+      responses:
+        "200": { description: WebP bytes, content: { image/webp: { schema: { type: string, format: binary } } } }
+        "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { description: not_found, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/token/renew:
+    post:
+      operationId: internalTokenRenew
+      tags: [internal]
+      summary: Session-bound access-token renewal for the portal BFF
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    sid: { type: string }
+                    sub: { type: string }
+                  required: [sid, sub]
+      responses:
+        "200":
+          description: Fresh token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, enum: [Bearer] }
+                  expires_in: { type: integer, example: 900 }
+                required: [access_token, token_type, expires_in]
+        "400": { description: invalid_request, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: invalid_client / session_gone, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/settings/turnstile:
+    post:
+      operationId: internalTurnstileSettings
+      tags: [internal]
+      summary: Hand the BFF its Turnstile secret + gate signing JWK
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientAssertion" }
+      responses:
+        "200":
+          description: Gate config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  site_key: { type: string, nullable: true }
+                  secret_key: { type: string, nullable: true }
+                  gate_public_jwk: { type: object, nullable: true, additionalProperties: true }
+                required: [enabled]
+        "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/reset/request:
+    post:
+      operationId: internalResetRequest
+      tags: [internal]
+      summary: Start a password reset (204 regardless of existence)
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties: { identifier: { type: string } }
+                  required: [identifier]
+      responses:
+        "204": { description: Accepted (work backgrounded) }
+        "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: invalid_identifier, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: email_not_configured, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/reset/validate:
+    post:
+      operationId: internalResetValidate
+      tags: [internal]
+      summary: Is the reset link usable, and is a strong-factor challenge required?
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties: { token: { type: string } }
+                  required: [token]
+      responses:
+        "200":
+          description: Validity + optional challenge
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  challenge: { $ref: "#/components/schemas/Challenge" }
+                required: [valid]
+        "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/reset/passkey-options:
+    post:
+      operationId: internalResetPasskeyOptions
+      tags: [internal]
+      summary: WebAuthn assertion options for the reset passkey step
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties: { token: { type: string } }
+                  required: [token]
+      responses:
+        "200":
+          description: PublicKeyCredentialRequestOptions
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                properties:
+                  challenge: { type: string }
+                  rpId: { type: string }
+                  timeout: { type: integer }
+                  userVerification: { type: string }
+                  allowCredentials: { type: array, items: { type: object, additionalProperties: true } }
+        "400": { description: method_unavailable, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/reset/confirm:
+    post:
+      operationId: internalResetConfirm
+      tags: [internal]
+      summary: Verify challenge, write password, revoke sessions, mint login ticket
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    token: { type: string }
+                    password: { type: string }
+                    method: { type: string, enum: [totp, passkey] }
+                    code: { type: string, description: 6-digit TOTP when method=totp }
+                    credential: { type: string, description: JSON-encoded WebAuthn assertion when method=passkey }
+                  required: [token, password]
+      responses:
+        "200":
+          description: Reset complete; browser hop URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { complete_url: { type: string, format: uri } }
+                required: [complete_url]
+        "401":
+          description: challenge_required / challenge_failed / challenge_expired
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  attempts_left: { type: integer }
+                  challenge: { $ref: "#/components/schemas/Challenge" }
+                required: [error]
+        "403": { description: too_many_attempts, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: invalid_token / weak_password, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/register/start:
+    post:
+      operationId: internalRegisterStart
+      tags: [internal]
+      summary: Begin registration (invite code + email), send link
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    email: { type: string, format: email }
+                    code: { type: string }
+                  required: [email]
+      responses:
+        "200":
+          description: Link sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean, enum: [true] }
+                  resend_backoff: { type: integer }
+                required: [sent]
+        "401": { description: invalid_client }
+        "403": { description: registration_closed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422":
+          description: field errors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  errors: { type: object, additionalProperties: { type: string } }
+        "429":
+          description: rate_limited
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  retry_after: { type: integer }
+                  can_retry: { type: boolean }
+        "503": { description: email_not_configured / send_failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/register/validate:
+    post:
+      operationId: internalRegisterValidate
+      tags: [internal]
+      summary: Is the registration link usable?
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    email: { type: string, format: email }
+                    token: { type: string }
+                  required: [email, token]
+      responses:
+        "200":
+          description: valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { valid: { type: boolean, enum: [true] } }
+                required: [valid]
+        "401": { description: invalid_client }
+        "403": { description: registration_closed }
+        "422": { description: invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/register/check-username:
+    post:
+      operationId: internalRegisterCheckUsername
+      tags: [internal]
+      summary: Token-gated username availability
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    email: { type: string, format: email }
+                    token: { type: string }
+                    username: { type: string }
+                  required: [email, token, username]
+      responses:
+        "200":
+          description: availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { available: { type: boolean } }
+                required: [available]
+        "401": { description: invalid_client }
+        "422": { description: invalid_token / invalid_username }
+  /internal/register/complete:
+    post:
+      operationId: internalRegisterComplete
+      tags: [internal]
+      summary: Create the identity, consume invite, mint welcome ticket
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    email: { type: string, format: email }
+                    token: { type: string }
+                    username: { type: string }
+                    display_name: { type: string }
+                    password: { type: string }
+                  required: [email, token, username, display_name, password]
+      responses:
+        "200":
+          description: Account created; browser hop URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { complete_url: { type: string, format: uri } }
+                required: [complete_url]
+        "401": { description: invalid_client }
+        "403": { description: registration_closed }
+        "409": { description: invitation_gone, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422":
+          description: field errors / invalid_token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  errors: { type: object, additionalProperties: { type: string } }
+                  error: { type: string }
+  /internal/email-change/verify:
+    post:
+      operationId: internalEmailChangeVerify
+      tags: [internal]
+      summary: Commit a verified email change/confirm from the capability link
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties: { token: { type: string } }
+                  required: [token]
+      responses:
+        "200":
+          description: Committed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, enum: [true] }
+                  kind: { type: string, enum: [confirm, change] }
+                required: [ok, kind]
+        "401": { description: invalid_client }
+        "409": { description: email_taken, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

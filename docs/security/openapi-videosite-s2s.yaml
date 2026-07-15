@@ -1,0 +1,260 @@
+# VERIFIED against source 2026-07-14 (Phase 3b). Endpoint coverage exact; two worker
+# response-shape drifts corrected (lease results[].status gained 'error'; status
+# results[].jobId is nullable). Only relevant for endpoints that stay CF-fronted
+# (see docs/security/s2s-endpoints.md, Decision A). Note: tasks/available's
+# availableSlot is marked required here as the enforced contract, though the handler
+# tolerates its absence (returns 200 with no tasks) — API Shield is intentionally
+# stricter than the origin there.
+
+openapi: 3.1.0
+info:
+  title: VideoSite service-to-service API (mTLS / API Shield)
+  version: "2026-07-13"
+  description: >
+    Server-to-server endpoints on stream.dreamxwarden.ca. /backchannel/events is
+    the SSO->RP event channel and is the only path in the CF require-cert set
+    (SSO presents a homelab-CA cert -> BYOCA at this edge). The /api/worker/*
+    transcode-worker API is machine-to-machine but authenticates with its OWN
+    keyId/keySecret -> Bearer worker-session, NOT CF mTLS; whether workers should
+    also present a CF client cert is an open decision (see the S2S map).
+servers:
+  - url: https://stream.dreamxwarden.ca
+tags:
+  - name: events
+  - name: worker
+components:
+  securitySchemes:
+    edgeMutualTLS:
+      type: mutualTLS
+      description: >
+        SSO client certificate verified at the Cloudflare edge
+        (cf.tls_client_auth.cert_verified). Homelab-CA-signed -> requires BYOCA
+        upload of the homelab CA on this zone/host.
+    workerBearer:
+      type: http
+      scheme: bearer
+      description: >
+        Worker session bearer token from POST /api/worker/auth. Looked up in
+        Redis/DB, IP-bound, 1h idle TTL (middleware/workerAuth.js). Not CF mTLS.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+paths:
+  /backchannel/events:
+    post:
+      operationId: ssoInboundEvents
+      tags: [events]
+      summary: SSO -> videosite event channel (logout, roles.sync_request, account.roles_change, org.settings, account.profile_change)
+      description: >
+        event_token is a JWT signed with the SSO signing key, verified against
+        the SSO JWKS (iss=SSO issuer, aud=videosite client_id, maxTokenAge 5m).
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                event_token: { type: string }
+              required: [event_token]
+      responses:
+        "204": { description: Accepted (all events processed/deduped) }
+        "400": { description: missing_event_token / invalid_events / invalid_event_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: server_error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/worker/auth:
+    post:
+      operationId: workerAuth
+      tags: [worker]
+      summary: Exchange worker keyId/keySecret for a bearer session token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keyId: { type: string }
+                keySecret: { type: string }
+              required: [keyId, keySecret]
+      responses:
+        "200":
+          description: Session token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bearerToken: { type: string }
+                  expiresInSeconds: { type: integer }
+                required: [bearerToken, expiresInSeconds]
+        "400": { description: missing fields, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: invalid/deactivated key or leak detected, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: auth error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/worker/tasks/available:
+    get:
+      operationId: workerTasksAvailable
+      tags: [worker]
+      summary: Reserve up to availableSlot pending tasks
+      security: [ { workerBearer: [] } ]
+      parameters:
+        - name: availableSlot
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 32 }
+      responses:
+        "200":
+          description: Reserved task ids (possibly empty)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      type: object
+                      properties: { videoId: { type: integer } }
+                      required: [videoId]
+                required: [tasks]
+        "401": { description: missing/invalid token or key not active, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: failure, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/worker/tasks/lease:
+    post:
+      operationId: workerTasksLease
+      tags: [worker]
+      summary: Lease previously-reserved videoIds
+      security: [ { workerBearer: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                videoIds: { type: array, items: { type: integer }, minItems: 1 }
+              required: [videoIds]
+      responses:
+        "200":
+          description: Per-id lease result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        videoId: { type: integer }
+                        # 'error' is emitted per-item when a single leaseTask throws
+                        # (services/processingService.js). A 'leased' item additionally
+                        # carries the job spec (jobId, downloadUrl, outputProfiles, ...),
+                        # permitted by additionalProperties above.
+                        status: { type: string, enum: [leased, taken, notfound, error] }
+                required: [results]
+        "400": { description: "videoIds[] required", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: unauthorized }
+        "500": { description: failure }
+  /api/worker/tasks/status:
+    post:
+      operationId: workerTasksStatus
+      tags: [worker]
+      summary: Batched per-job status updates
+      security: [ { workerBearer: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jobs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      jobId: { type: string }
+                      status: { type: string }
+                      stage: { type: string }
+                      progress: { type: number }
+                      errorMessage: { type: string }
+                    required: [jobId, status]
+              required: [jobs]
+      responses:
+        "200":
+          description: Per-job ack
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        # null when the corresponding request entry lacked a jobId
+                        # (reportJobStatuses echoes {jobId:null, ack:false}).
+                        jobId: { type: [string, "null"] }
+                        ack: { type: boolean }
+                      required: [jobId, ack]
+                required: [results]
+        "400": { description: "jobs[] required", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: unauthorized }
+        "500": { description: failure }
+  /api/worker/tasks/complete:
+    post:
+      operationId: workerTasksComplete
+      tags: [worker]
+      summary: Single-job completion
+      security: [ { workerBearer: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jobId: { type: string }
+                durationSeconds: { type: number }
+                hasPoster: { type: boolean }
+              required: [jobId]
+      responses:
+        "204": { description: Completed }
+        "400": { description: jobId required, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: unauthorized }
+        "404": { description: Job not found, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: failure }
+  /api/worker/tasks/upload-urls:
+    post:
+      operationId: workerTasksUploadUrls
+      tags: [worker]
+      summary: Presigned PUT URLs for HLS output
+      security: [ { workerBearer: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jobId: { type: string }
+                filenames: { type: array, items: { type: string }, minItems: 1 }
+              required: [jobId, filenames]
+      responses:
+        "200":
+          description: Upload URLs
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { description: "jobId and filenames[] required", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: unauthorized }
+        "404": { description: Task not found, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: failure }

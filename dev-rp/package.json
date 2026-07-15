@@ -1,0 +1,12 @@
+{
+  "name": "dev-rp",
+  "private": true,
+  "type": "module",
+  "description": "Throwaway OIDC relying party for local testing (stands in for videosite until it speaks OIDC)",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^5.1.0",
+    "jose": "^5.9.6"
+  }
+}

@@ -1,0 +1,110 @@
+# Authored 2026-07-14 (Phase 3b) from source. The account portal BFF (account/server)
+# is a CALLEE for exactly two SSO-originated S2S calls. Both are CF-fronted and belong
+# in the account-host require-cert set (see docs/security/s2s-endpoints.md §4). App-layer
+# auth is a signed JWT verified against the SSO's JWKS; client mTLS is terminated and
+# verified at the Cloudflare edge (cf.tls_client_auth.cert_verified). Everything else the
+# BFF serves is browser/SPA traffic (/auth/*, /api/*, /reset/*, /register/*, its own
+# /.well-known/jwks.json, static) and is NOT in this spec.
+
+openapi: 3.1.0
+info:
+  title: DreamSSO account-portal BFF service-to-service API (mTLS / API Shield)
+  version: "2026-07-14"
+  description: >
+    Server-to-server RECEIVER endpoints on account[-dev].dreamxwarden.ca that the
+    DreamSSO backend calls: the generic back-channel event channel (logout fan-out)
+    and the client-key rotation relay. Both verify an SSO-signed JWT (iss=SSO issuer,
+    aud=this BFF's client_id) against the SSO's JWKS. The caller presents the SSO's
+    client cert, verified at the CF edge; origins never see it.
+servers:
+  - url: https://account.dreamxwarden.ca
+security:
+  - edgeMutualTLS: []
+tags:
+  - name: events
+  - name: internal
+components:
+  securitySchemes:
+    edgeMutualTLS:
+      type: mutualTLS
+      description: >
+        Client certificate presented by the DreamSSO backend and verified at the
+        Cloudflare edge. In prod the SSO uses its own CF-managed (or BYOCA) client
+        cert; the BFF host's require-cert set must trust that CA.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+paths:
+  /backchannel/events:
+    post:
+      operationId: bffInboundEvents
+      tags: [events]
+      summary: SSO -> BFF event channel (logout fan-out; unknown types ACKed)
+      description: >
+        event_token is a JWT signed by the SSO (iss=SSO issuer, aud=BFF client_id,
+        maxTokenAge 5m, clockTolerance 10s) carrying events:[{id,type,payload}]. Each
+        event id is deduped in Redis (evt:seen:{id}, 7d) so redelivery is a no-op.
+        The only handled type today is `logout` {payload:{sid}} -> revokeBySsoSid;
+        unrecognized types are accepted so the SSO can add types without wedging the RP.
+        Handler: account/server/src/routes/backchannel.ts.
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event_token: { type: string, description: SSO-signed events+jwt }
+              required: [event_token]
+      responses:
+        "204": { description: All events processed or deduped }
+        "400":
+          description: missing_event_token / invalid_events (empty or >100) / invalid_event_id
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: invalid_token (bad signature / issuer / audience / expiry)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "500":
+          description: processing_failed (a handled event threw; id un-seen so redelivery reprocesses)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /internal/rotate-client-key:
+    post:
+      operationId: bffRotateClientKey
+      tags: [internal]
+      summary: SSO-triggered rotation of the BFF's own OIDC client key
+      description: >
+        The SSO admin console asks the BFF to rotate its client key (the BFF never
+        rotates on its own). token is a short-lived JWT signed by the SSO
+        (typ=rotate+jwt, iss=SSO issuer, aud=BFF client_id, maxTokenAge 90s) with a
+        jti that is single-use (acct:rotate:jti:{jti}, 300s NX) to block replay. On
+        success the BFF mints a new Ed25519 key, prepends it to its multi-key JWKS
+        (new + previous), and returns the new key id. Handler:
+        account/server/src/server.ts -> oidc.ts rotateClientKey().
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string, description: SSO-signed rotate+jwt }
+              required: [token]
+      responses:
+        "200":
+          description: Rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kid: { type: string, description: new key id (RFC-7638 thumbprint) }
+                  rotated_at: { type: string, format: date-time }
+                required: [kid, rotated_at]
+        "401":
+          description: invalid_token (bad signature / typ / audience / expiry / replayed jti)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

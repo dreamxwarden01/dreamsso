@@ -1,0 +1,34 @@
+{
+  "name": "account-bff",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "DreamSSO account console — backend-for-frontend (OIDC RP; holds tokens server-side).",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:setup && npm run test:mtls && npm run test:mtls-handshake",
+    "test:setup": "tsx scripts/setup-e2e-test.ts",
+    "test:mtls": "tsx scripts/mtls-test.ts",
+    "test:mtls-handshake": "tsx scripts/mtls-handshake-test.ts"
+  },
+  "dependencies": {
+    "@peculiar/x509": "^2.0.0",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "ioredis": "^5.4.2",
+    "jose": "^5.9.6",
+    "reflect-metadata": "^0.2.2",
+    "undici": "^8.7.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
