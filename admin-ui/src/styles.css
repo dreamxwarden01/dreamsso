@@ -45,7 +45,9 @@ img.av-sm { object-fit: cover; display: block; }
 .pmenu-trigger:hover { background: #f1f3f4; }
 .pmenu-trigger .uname { font-size: 13px; color: var(--mut); }
 @media (max-width: 720px) { .pmenu-trigger .uname { display: none; } } /* mobile keeps the avatar only */
-.pmenu-panel { position: absolute; top: calc(100% + 8px); right: 0; width: 320px; background: #fff; border: 1px solid var(--bd); border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14); z-index: 80; overflow: hidden; }
+.pmenu-panel { position: absolute; top: calc(100% + 8px); right: 0; width: 320px; background: #fff; border: 1px solid var(--bd); border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14); z-index: 80; overflow: hidden; transform-origin: top right; animation: pmenu-in .16s ease-in-out; }
+@keyframes pmenu-in { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@media (prefers-reduced-motion: reduce) { .pmenu-panel { animation: none; } }
 .pmenu-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--bd); }
 .pmenu-org { font-size: 13px; font-weight: 600; color: var(--tx); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pmenu-signout { border: 0; background: none; color: var(--mut); font-size: 13px; cursor: pointer; padding: 4px 6px; border-radius: 6px; flex-shrink: 0; font-family: inherit; }
