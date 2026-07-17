@@ -169,9 +169,16 @@ function htmlPage(res: Response, redirectUri?: string): string {
   if (redirectUri) {
     try { formAction += ' ' + new URL(redirectUri).origin; } catch { /* ignore bad uri */ }
   }
+  // connect-src 'self': Cloudflare injects same-origin telemetry beacons into
+  // this page — the managed-challenge JS-detection ping (/cdn-cgi/challenge-platform/
+  // …/jsd/oneshot/…) that fires post-solve, and the Web Analytics RUM beacon
+  // (/cdn-cgi/rum). Both are same-origin (CF serves /cdn-cgi/* at the edge), so
+  // 'self' unblocks them without opening any external origin. Blocking the jsd
+  // ping would degrade the very bot signal the /login managed challenge exists to
+  // collect. Our own inline script is nonce-gated and makes no fetches.
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; img-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; img-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`,
   );
   return nonce;
 }
