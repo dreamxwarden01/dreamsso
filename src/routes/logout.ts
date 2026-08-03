@@ -27,9 +27,13 @@ logoutRouter.get('/logout', async (req: Request, res: Response) => {
   }
   const nonce = crypto.randomBytes(16).toString('base64');
   res.setHeader('Cache-Control', 'no-store');
+  // img-src 'self': the shared auth-card style paints the bloom background from
+  // /auth-bg.svg (and links /favicon.svg). Without the directive both fall back
+  // to default-src 'none' and are silently blocked — this page rendered bare
+  // white while every other auth page had the bloom.
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; style-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; img-src 'self'; style-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
   );
   res.status(200).type('html').send(renderSignedOutPage(nonce, (await getSetting('site_name', 'DreamSSO'))!));
 });

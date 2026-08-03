@@ -1,10 +1,9 @@
 import { Router, raw, type Request, type Response } from 'express';
-import { jwtVerify } from 'jose';
 import { pool } from '../db.js';
 import { config } from '../config.js';
 import { requireScope, type AuthedRequest } from '../resourceAuth.js';
 import { requirePerm } from '../rbac/index.js';
-import { clientKeySet } from './token.js';
+import { assertedClient } from '../oidc/clientAssertion.js';
 import { enqueueEvents } from '../events.js';
 import {
   processAndStoreAvatar, readAvatar, deleteAvatarFile, MAX_AVATAR_BYTES,
@@ -92,42 +91,6 @@ avatarRouter.get('/avatar/:file', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
   res.type('image/webp').send(buf);
 });
-
-// Generic client-assertion check (any enabled client, not just the portal):
-// the assertion's iss names the client; verified against its registered keys.
-async function assertedClient(body: Record<string, unknown>): Promise<string | null> {
-  if (
-    body.client_assertion_type !== 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer' ||
-    typeof body.client_assertion !== 'string'
-  ) {
-    return null;
-  }
-  let iss = '';
-  try {
-    iss = String(JSON.parse(Buffer.from(body.client_assertion.split('.')[1], 'base64url').toString()).iss ?? '');
-  } catch {
-    return null;
-  }
-  if (!iss) return null;
-  const { rows } = await pool.query(
-    'SELECT client_id, jwks, jwks_uri, disabled_at FROM oauth_clients WHERE client_id = $1',
-    [iss],
-  );
-  const client = rows[0];
-  if (!client || client.disabled_at) return null;
-  const keySet = clientKeySet(client);
-  if (!keySet) return null;
-  try {
-    await jwtVerify(body.client_assertion, keySet, {
-      issuer: client.client_id,
-      subject: client.client_id,
-      audience: [config.issuer, `${config.issuer}/token`],
-    });
-    return client.client_id;
-  } catch {
-    return null;
-  }
-}
 
 avatarRouter.post('/internal/avatar', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;

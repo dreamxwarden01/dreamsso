@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { pool } from '../db.js';
 import { getSetting } from '../settings.js';
+import { fanOutLogout } from './backchannel.js';
 
 export const SESSION_COOKIE = 'sso_session';
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest();
@@ -228,15 +229,28 @@ export async function loadSessionBySid(sid: string): Promise<ActiveSession | nul
 
 // DB backstop (videosite's cleanExpiredSessions): prune rows past either window
 // so the table and the Devices pane stay clean. Called hourly from server.ts.
+//
+// Expiry is a REVOCATION, not just bookkeeping: the RP sessions this session
+// spawned outlive it otherwise. Deleting the row silently used to strand them —
+// every other revocation path is sid-scoped (fanOutLogout over the row's
+// `clients`), so once the row is gone nothing can ever reach those RP sessions
+// again and they run out their own local clocks, unreachable by "sign out
+// everywhere" or an admin terminate. This is the last moment we still hold the
+// sid + clients needed to tell them, so we fan out logout before dropping the
+// rows (same DELETE ... RETURNING pattern as devices/security/reset).
 export async function cleanExpiredSessions(): Promise<void> {
   try {
     const { idleHours, maxHours, transientMaxHours } = await getSessionWindows();
-    await pool.query(
+    const { rows } = await pool.query<{ user_sub: string; sid: string; clients: string[] | null }>(
       `DELETE FROM sessions
         WHERE last_seen < $1
-           OR created_at < (CASE WHEN persistent THEN $2::timestamptz ELSE $3::timestamptz END)`,
+           OR created_at < (CASE WHEN persistent THEN $2::timestamptz ELSE $3::timestamptz END)
+        RETURNING user_sub, sid, clients`,
       [hoursAgo(idleHours), hoursAgo(maxHours), hoursAgo(transientMaxHours)],
     );
+    // Enqueue-only (Redis zset + 2s debounce); never rejects. Clients that never
+    // touched the session aren't told, same scoping rule as every other caller.
+    await Promise.allSettled(rows.map((r) => fanOutLogout(r.user_sub, r.sid, r.clients ?? [])));
   } catch (e) {
     console.error('cleanExpiredSessions failed:', (e as Error).message);
   }

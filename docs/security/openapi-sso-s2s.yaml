@@ -175,6 +175,51 @@ paths:
         "200": { description: WebP bytes, content: { image/webp: { schema: { type: string, format: binary } } } }
         "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "404": { description: not_found, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/session-activity:
+    post:
+      operationId: internalSessionActivity
+      tags: [internal]
+      summary: RP reports that an SSO-backed session is in use
+      description: >
+        Keeps the SSO idle window in step with real RP traffic (the window is
+        measured against sessions.last_seen, which otherwise only moved on
+        SSO-side requests). Reports are coalesced by the RP to roughly one per
+        session per 5 minutes. The reported last_seen is clamped to now, so a
+        skewed or hostile RP cannot extend a session indefinitely, and the report
+        only applies to sessions whose clients[] already includes the caller.
+        A 410 authorises the RP to terminate its own session, so the verdict is
+        signed; RPs must ignore any other status rather than acting on it.
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    sid: { type: string, format: uuid, description: the SSO session id (id_token sid) }
+                    last_seen: { type: integer, description: epoch ms of last observed activity; clamped to now }
+                  required: [sid]
+      responses:
+        "204": { description: accepted — last_seen advanced }
+        "400": { description: invalid_sid, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: invalid_client, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "410":
+          description: >
+            session_invalid — unknown, expired, or not this client's session. The
+            RP must terminate its own session, but only after verifying `verdict`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, enum: [session_invalid] }
+                  verdict:
+                    type: string
+                    description: EdDSA JWT (typ verdict+jwt) signed by the SSO, iss=issuer, aud=client, claims {status:"invalid", sid}
+                required: [error, verdict]
   /internal/token/renew:
     post:
       operationId: internalTokenRenew

@@ -18,6 +18,7 @@ import { registerRouter } from './routes/register.js';
 import { emailChangeRouter } from './routes/emailChangeRoutes.js';
 import { portalTokenRouter } from './routes/portalToken.js';
 import { eventsRouter } from './routes/events.js';
+import { sessionActivityRouter } from './routes/sessionActivity.js';
 import { orgRouter } from './routes/org.js';
 import { setupGate, setupRouter } from './routes/setup.js';
 import { resolveSetupState, isSetupComplete } from './setup/state.js';
@@ -96,6 +97,7 @@ app.use(registerRouter);
 app.use(emailChangeRouter);
 app.use(portalTokenRouter);
 app.use(eventsRouter);
+app.use(sessionActivityRouter);
 app.use(orgRouter);
 
 app.get('/healthz', async (_req, res) => {
