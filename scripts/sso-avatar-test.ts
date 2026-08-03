@@ -270,14 +270,26 @@ ok(((await r.json()) as { profile: { picture: string | null } }).profile.picture
     r = await fetch(BFF + '/api/org/users/' + sub + '/avatar', { method: 'DELETE', headers: { cookie: cookie() } });
     ok(r.status === 404, '14b. self via org route -> 404 (never self-administer)');
 
+    // org_audit_log is append-only and survives the run, so the count must be
+    // scoped to THIS run — an unscoped `=== 1` passes once and fails every time
+    // after. Same convention as sso-org-admin-test's `created_at >= startedAt`.
+    const beforeRemove = new Date();
     r = await fetch(BFF + '/api/org/users/' + tSub + '/avatar', { method: 'DELETE', headers: { cookie: cookie() } });
     ok(r.status === 204, '14c. admin removes the picture -> 204', `(${r.status})`);
     const { rows: [{ avatar: tAv }] } = await pool.query('SELECT avatar FROM identities WHERE sub = $1', [tSub]);
     ok(tAv === null && !fs.existsSync(path.join(AVATAR_DIR, tFile)), '14d. cleared in DB + file removed');
-    const { rows: aud } = await pool.query(
-      `SELECT 1 FROM org_audit_log WHERE action = 'user.avatar_remove' AND target_sub = $1 AND actor_sub = $2`,
-      [tSub, sub]);
-    ok(aud.length === 1, '14e. audit entry user.avatar_remove');
+    // audit() is fire-and-forget (src/audit.ts: pool.query(...).catch(), never
+    // awaited), so the 204 can beat its INSERT — poll instead of reading once.
+    const auditRows = async () => (await pool.query(
+      `SELECT 1 FROM org_audit_log
+        WHERE action = 'user.avatar_remove' AND target_sub = $1 AND actor_sub = $2 AND created_at >= $3`,
+      [tSub, sub, beforeRemove])).rows.length;
+    let audN = 0;
+    for (let i = 0; i < 20 && audN === 0; i++) {
+      audN = await auditRows();
+      if (!audN) await new Promise((res) => setTimeout(res, 100));
+    }
+    ok(audN === 1, '14e. audit entry user.avatar_remove', `(${audN})`);
 
     // role default deny: back to standard_user -> requirePerm blocks up front
     await pool.query(`UPDATE user_org_roles SET org_role_slug = 'standard_user' WHERE user_sub = $1`, [sub]);
@@ -286,6 +298,7 @@ ok(((await r.json()) as { profile: { picture: string | null } }).profile.picture
     ok(r.status === 403 && b15.error === 'permission_denied', '15. standard_user denied org remove', `(${r.status} ${b15.error})`);
   } finally {
     await pool.query(`UPDATE user_org_roles SET org_role_slug = $2 WHERE user_sub = $1`, [sub, origRole]);
+    await pool.query(`DELETE FROM org_audit_log WHERE action = 'user.avatar_remove' AND target_sub = $1`, [tSub]);
     await pool.query(`DELETE FROM user_org_roles WHERE user_sub = $1`, [tSub]);
     await pool.query(`DELETE FROM identities WHERE sub = $1`, [tSub]);
     if (fs.existsSync(path.join(AVATAR_DIR, tFile))) fs.unlinkSync(path.join(AVATAR_DIR, tFile));
