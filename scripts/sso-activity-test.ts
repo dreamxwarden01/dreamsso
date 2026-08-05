@@ -108,6 +108,20 @@ try {
   ok(false, 'verdict signature verifies', (e as Error).message);
 }
 
+// Type confusion: every token the SSO signs for an RP shares iss/aud, so without
+// a typ check a verdict and an events envelope are interchangeable at the
+// verifier despite carrying different authority. Feed a REAL verdict to the real
+// events endpoint and it must be refused on media type, not merely fall over on
+// payload shape further in.
+{
+  const r2 = await fetch('https://stream-dev.dreamxwarden.ca/backchannel/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ event_token: r.json.verdict }),
+  });
+  ok(r2.status === 401, 'a verdict token is REJECTED by /backchannel/events (typ pinned)', `got ${r2.status}`);
+}
+
 console.log('\n--- happy path ---');
 const live = await mkSession({ lastSeen: '1 hour' });
 const before = await lastSeenOf(live);
