@@ -80,6 +80,24 @@ export interface NewSession {
   ip?: string;
   userAgent?: string;
   country?: string; // cf-ipcountry at login (null/absent -> Unknown)
+  city?: string; // cf-ipcity
+  region?: string; // cf-region (full name, e.g. "British Columbia")
+}
+
+// Visitor location from the Cloudflare edge, for the Devices pane.
+//
+// cf-ipcountry ships with IP geolocation alone; city/region only arrive when the
+// zone has the "Add visitor location headers" managed transform enabled. Absent
+// headers are simply undefined, so the display falls back country-only and a
+// non-Cloudflare (local/dev) request records nothing at all — no special-casing
+// anywhere downstream. Captured once at login and never refreshed, same as
+// country always has been: it describes where the session STARTED.
+export function clientGeo(req: { headers: Record<string, unknown> }): Pick<NewSession, 'country' | 'city' | 'region'> {
+  const h = (name: string): string | undefined => {
+    const v = req.headers[name];
+    return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+  };
+  return { country: h('cf-ipcountry'), city: h('cf-ipcity'), region: h('cf-region') };
 }
 
 // Create an SSO master session: a server-side row keyed by sha-256 of the cookie
@@ -96,11 +114,11 @@ export async function createSession(res: Response, s: NewSession): Promise<{ sid
   const { transientMaxHours } = await getSessionWindows();
   const expires = new Date(Date.now() + transientMaxHours * 60 * 60 * 1000); // expires_at is vestigial; windows are dynamic
   const { rows } = await pool.query(
-    `INSERT INTO sessions (user_sub, token_hash, amr, acr, auth_time, ip, user_agent, country, expires_at, stepup_at, stepup_method)
-     VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, now(), $9)
+    `INSERT INTO sessions (user_sub, token_hash, amr, acr, auth_time, ip, user_agent, country, city, region, expires_at, stepup_at, stepup_method)
+     VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10, now(), $11)
      RETURNING sid`,
-    [s.userSub, sha256(token), s.amr, s.acr ?? null, s.ip ?? null, s.userAgent ?? null, s.country ?? null, expires,
-     methodFromAmr(s.amr)],
+    [s.userSub, sha256(token), s.amr, s.acr ?? null, s.ip ?? null, s.userAgent ?? null, s.country ?? null,
+     s.city ?? null, s.region ?? null, expires, methodFromAmr(s.amr)],
   );
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,

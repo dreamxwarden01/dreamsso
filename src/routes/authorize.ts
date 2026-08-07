@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { pool } from '../db.js';
 import { createTxn, getTxn, consumeTxn, updateTxn, type LoginTxn } from '../oidc/transactions.js';
 import { createCode } from '../oidc/codes.js';
-import { createSession, loadSession, stampStepup, persistSession, methodFromAmr } from '../oidc/sessions.js';
+import { createSession, loadSession, stampStepup, persistSession, methodFromAmr, clientGeo } from '../oidc/sessions.js';
 import { findByUsernameOrEmail, verifyPassword } from '../oidc/identities.js';
 import { countAuthenticators, verifyLoginTotp } from '../mfa.js';
 import { countPasskeys, loginAuthOptions, verifyLoginAssertion } from '../webauthn.js';
@@ -75,7 +75,7 @@ async function finishLogin(
 ): Promise<void> {
   const { sid } = await createSession(res, {
     userSub: sub, amr, acr, ip: req.ip, userAgent: qstr(req.headers['user-agent']),
-    country: qstr(req.headers['cf-ipcountry']).trim() || undefined, // Cloudflare edge header; absent locally -> Unknown
+    ...clientGeo(req), // Cloudflare edge headers; absent locally -> Unknown
   });
   txn.kmsi = { sid, sub, userLabel, amr, acr, authTime: Math.floor(Date.now() / 1000) };
   await updateTxn(txnId, txn);

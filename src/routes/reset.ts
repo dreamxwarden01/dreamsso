@@ -6,7 +6,7 @@ import { pool } from '../db.js';
 import { config } from '../config.js';
 import { getSetting, hasSetting, getSecretSetting } from '../settings.js';
 import { findByUsernameOrEmail, type Identity } from '../oidc/identities.js';
-import { createSession } from '../oidc/sessions.js';
+import { createSession, clientGeo } from '../oidc/sessions.js';
 import { createTxn } from '../oidc/transactions.js';
 import { fanOutLogout } from '../oidc/backchannel.js';
 import { countAuthenticators, verifyLoginTotp } from '../mfa.js';
@@ -315,7 +315,7 @@ resetRouter.get('/reset/complete', async (req: Request, res: Response) => {
     acr: ticket.acr,
     ip: req.ip,
     userAgent: qstr(req.headers['user-agent']),
-    country: qstr(req.headers['cf-ipcountry']).trim() || undefined,
+    ...clientGeo(req),
   });
   const next = `${portal}/auth/login`;
   const txnId = await createTxn({

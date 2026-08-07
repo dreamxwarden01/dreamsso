@@ -20,6 +20,8 @@ interface SessionRow {
   sid: string;
   user_agent: string | null;
   country: string | null;
+  city: string | null;
+  region: string | null;
   auth_time: Date;
   last_seen: Date;
   clients: string[];
@@ -32,7 +34,7 @@ devicesRouter.get('/account/sessions', scoped, requirePerm('profile.security.ses
   // session that /authorize would reject.
   const { idleHours, maxHours, transientMaxHours } = await getSessionWindows();
   const { rows } = await pool.query<SessionRow>(
-    `SELECT sid, user_agent, country, auth_time, last_seen, clients
+    `SELECT sid, user_agent, country, city, region, auth_time, last_seen, clients
        FROM sessions
       WHERE user_sub = $1 AND last_seen > $2
         AND created_at > (CASE WHEN persistent THEN $3::timestamptz ELSE $4::timestamptz END)
@@ -57,7 +59,11 @@ devicesRouter.get('/account/sessions', scoped, requirePerm('profile.security.ses
       sid: r.sid,
       device_name: d.name,
       device_type: d.type,
-      country: r.country, // raw code; the SPA formats (Intl.DisplayNames, T1 -> Tor, null -> Unknown)
+      // Raw values; the SPA formats (fmtLocation: "city, country" -> "region,
+      // country" -> "country"; Intl.DisplayNames, T1 -> Tor, null -> Unknown).
+      country: r.country,
+      city: r.city,
+      region: r.region,
       first_signin: r.auth_time,
       last_seen: r.last_seen,
       // The account console itself is hidden — it's the portal, not a service the

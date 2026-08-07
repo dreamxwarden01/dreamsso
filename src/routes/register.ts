@@ -5,7 +5,7 @@ import { uuidv7 } from 'uuidv7';
 import { pool } from '../db.js';
 import { config } from '../config.js';
 import { getSetting, hasSetting } from '../settings.js';
-import { createSession } from '../oidc/sessions.js';
+import { createSession, clientGeo } from '../oidc/sessions.js';
 import { createTxn } from '../oidc/transactions.js';
 import { sendEmail } from '../email.js';
 import { renderRegistrationEmail } from '../emailTemplates.js';
@@ -252,7 +252,7 @@ registerRouter.get('/welcome', async (req: Request, res: Response) => {
     acr: ticket.acr,
     ip: req.ip,
     userAgent: qstr(req.headers['user-agent']),
-    country: qstr(req.headers['cf-ipcountry']).trim() || undefined,
+    ...clientGeo(req),
   });
   const next = `${portal}/auth/login`;
   const txnId = await createTxn({

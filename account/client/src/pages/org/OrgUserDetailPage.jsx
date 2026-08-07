@@ -6,6 +6,7 @@ import Icon from '../../components/Icon.jsx';
 import Modal from '../../components/Modal.jsx';
 import ActionChallengeModal from '../../components/ActionChallengeModal.jsx';
 import PasswordRules, { passwordValid } from '../../components/PasswordRules.jsx';
+import { fmtLocation } from '../../format.js';
 import { Ph, Skeleton } from '../../components/Skeleton.jsx';
 import { initials } from '../../components/Avatar.jsx';
 import SaveBar from '../../components/SaveBar.jsx';
@@ -400,7 +401,7 @@ function SessionsSection({ sub, can, act }) {
               <div style={{ minWidth: 0 }}>
                 <p className="row-title" style={{ margin: 0 }}>{deviceLabel(s.device)}</p>
                 <p className="k" style={{ margin: 0, fontSize: 12 }}>
-                  {s.country ? s.country + ' · ' : ''}signed in {fmtWhen(s.auth_time)} · active {fmtWhen(s.last_seen)}
+                  {s.country ? fmtLocation(s) + ' · ' : ''}signed in {fmtWhen(s.auth_time)} · active {fmtWhen(s.last_seen)}
                 </p>
               </div>
             </div>

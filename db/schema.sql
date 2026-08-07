@@ -139,6 +139,8 @@ CREATE TABLE sessions (                           -- the SSO master (browser) se
     ip           inet,
     user_agent   text,
     country      text,                            -- cf-ipcountry at login (null = Unknown; T1 = Tor)
+    city         text,                            -- cf-ipcity  \ both need the "Add visitor location
+    region       text,                            -- cf-region  / headers" transform on the zone; null = show country only
     clients      text[] NOT NULL DEFAULT '{}',     -- client_ids that redeemed a code under this session (apps-accessed + scoped fan-out)
     stepup_at    timestamptz,                     -- sudo window: last verification (login pre-clearance or step-up challenge)
     stepup_method text,                            -- method of that verification: passkey|totp|email|password (tiered step-up: scenarios demand a tier)

@@ -647,7 +647,7 @@ orgRouter.get('/account/org/users/:sub/sessions', scoped, requirePerm('org.users
     const ctx = await editableTarget(req, res);
     if (!ctx) return;
     const { rows } = await pool.query(
-      `SELECT sid, user_agent, country, auth_time, last_seen FROM sessions
+      `SELECT sid, user_agent, country, city, region, auth_time, last_seen FROM sessions
         WHERE user_sub = $1 ORDER BY last_seen DESC NULLS LAST, auth_time DESC`,
       [ctx.t.sub],
     );
@@ -656,6 +656,8 @@ orgRouter.get('/account/org/users/:sub/sessions', scoped, requirePerm('org.users
         sid: s.sid,
         device: parseDevice(s.user_agent ?? ''),
         country: s.country ?? null,
+        city: s.city ?? null,
+        region: s.region ?? null,
         auth_time: s.auth_time,
         last_seen: s.last_seen,
       })),

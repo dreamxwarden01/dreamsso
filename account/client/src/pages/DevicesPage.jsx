@@ -4,19 +4,9 @@ import Icon from '../components/Icon.jsx';
 import Modal from '../components/Modal.jsx';
 import { Ph } from '../components/Skeleton.jsx';
 import { fmtDate } from './SecurityPage.jsx';
+import { fmtLocation } from '../format.js';
 
 const DEVICE_ICON = { desktop: 'laptop', mobile: 'phone', tablet: 'tablet' };
-
-// cf-ipcountry (2-char ISO) -> human label. T1 = Tor exit; null/XX/unknown -> Unknown.
-function fmtCountry(code) {
-  if (!code || code === 'XX') return 'Unknown';
-  if (code === 'T1') return 'Tor network';
-  try {
-    return new Intl.DisplayNames(undefined, { type: 'region' }).of(code) || code;
-  } catch {
-    return code;
-  }
-}
 
 export default function DevicesPage() {
   const [sessions, setSessions] = useState(null);
@@ -71,7 +61,7 @@ export default function DevicesPage() {
             </span>
             <div className="row-main">
               <h1 className="devhead-name">{current.device_name}</h1>
-              <p className="k">{fmtCountry(current.country)}</p>
+              <p className="k">{fmtLocation(current)}</p>
               {current.is_current && (
                 <span className="this-device">
                   <Icon name="check-circle" size={15} /> This device
@@ -164,7 +154,7 @@ export default function DevicesPage() {
                       {s.is_current && <span className="this-device inline"> · This device</span>}
                     </p>
                     <p className="k">
-                      {fmtCountry(s.country)} · Last seen {fmtDate(s.last_seen) || '—'}
+                      {fmtLocation(s)} · Last seen {fmtDate(s.last_seen) || '—'}
                     </p>
                   </div>
                 </div>

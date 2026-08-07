@@ -15,7 +15,7 @@ import {
 } from '../setup/config.js';
 import { validateFinish, runFinishTransaction } from '../setup/finish.js';
 import { renderWizard } from '../setup/wizard.js';
-import { createSession } from '../oidc/sessions.js';
+import { createSession, clientGeo } from '../oidc/sessions.js';
 
 const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -176,7 +176,7 @@ setupRouter.post('/setup/finish', async (req, res) => {
       acr: 'urn:dreamsso:1fa',
       ip: req.ip,
       userAgent: qstr(req.headers['user-agent']),
-      country: qstr(req.headers['cf-ipcountry']).trim() || undefined,
+      ...clientGeo(req),
     });
     res.status(204).end(); // the wizard navigates to /admin (now unlocked)
   } catch (err) {
