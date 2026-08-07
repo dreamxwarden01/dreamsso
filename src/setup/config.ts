@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
+import { runMigrations } from '../db/migrations.js';
 import IORedis from 'ioredis';
 import { applyConfig, isValidKek } from '../config.js';
 import { reconnectDb } from '../db.js';
@@ -206,11 +207,17 @@ export async function applyAndPersist(r: ResolvedConfig): Promise<void> {
     ? process.env.KEY_ENCRYPTION_KEY!
     : ensureKek();
 
-  // Apply the schema on a throwaway pool if the core table is absent.
+  // Apply the schema on a throwaway pool if the core table is absent, then bring
+  // the schema up to date. An install pointed at an EXISTING database (a rebuilt
+  // app server on the old DB) skips the schema and needs the migrations; a fresh
+  // one gets schema.sql and the migrations no-op over it. STRICT here — telling
+  // the operator the install succeeded on top of a half-migrated schema is worse
+  // than failing the step.
   const tmp = new pg.Pool({ connectionString: databaseUrl, max: 1 });
   try {
     const { rows } = await tmp.query<{ t: string | null }>("SELECT to_regclass('public.identities') AS t");
     if (!rows[0]?.t) await tmp.query(fs.readFileSync(SCHEMA_FILE, 'utf8'));
+    await runMigrations({ strict: true, pool: tmp });
   } finally {
     await tmp.end().catch(() => {});
   }

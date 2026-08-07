@@ -29,6 +29,7 @@ import { pool } from './db.js';
 import { redis } from './redis.js';
 import { getSigningKey } from './keys.js';
 import { cleanExpiredSessions } from './oidc/sessions.js';
+import { runMigrations } from './db/migrations.js';
 import crypto from 'node:crypto';
 import { render404Page } from './views.js';
 
@@ -135,6 +136,12 @@ async function main() {
     });
     return;
   }
+
+  // Schema first, before anything touches the tables. Lenient by design: a
+  // migration failure is logged and the SSO still comes up, because a running
+  // identity provider is more useful than one that refuses to start — the
+  // installer runs the same thing in strict mode, where the opposite is true.
+  await runMigrations();
 
   const { kid } = await getSigningKey();
   // DB backstop: prune sessions past the idle/absolute windows (hourly + at boot).
