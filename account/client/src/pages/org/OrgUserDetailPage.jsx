@@ -141,6 +141,7 @@ function ProfileSection({ d, can, act }) {
   const [f, setF] = useState({ display_name: p.display_name ?? '', email: p.email ?? '', username: p.username });
   const [errs, setErrs] = useState({});
   const [busy, setBusy] = useState(false);
+  const [confirmAvatar, setConfirmAvatar] = useState(false);
   useEffect(() => setF({ display_name: p.display_name ?? '', email: p.email ?? '', username: p.username }), [p]);
 
   const dirty =
@@ -184,8 +185,7 @@ function ProfileSection({ d, can, act }) {
           <div className="av-lg">{initials(p.display_name || p.username)}</div>
         )}
         {p.avatar && can('org.users.edit.profilePicture.remove') && (
-          <button className="linklike" disabled={busy}
-            onClick={() => act(() => orgApi('DELETE', `/users/${p.sub}/avatar`), 'Profile picture removed.').catch(() => {})}>
+          <button className="linklike" disabled={busy} onClick={() => setConfirmAvatar(true)}>
             Remove profile picture
           </button>
         )}
@@ -229,6 +229,33 @@ function ProfileSection({ d, can, act }) {
         </div>
       </div>
       </div>
+      {/* Deleting someone else's picture wipes the stored file — there is no
+          undo and they can't put it back themselves from here. One inline
+          click was too cheap for that. */}
+      {confirmAvatar && (
+        <Modal title="Remove profile picture?" onClose={() => setConfirmAvatar(false)}>
+          <p className="modal-msg">
+            This permanently deletes {p.display_name || p.username}&rsquo;s picture. It can&rsquo;t be
+            undone — only they can upload a new one.
+          </p>
+          <div className="modal-actions">
+            <button className="btn btn-danger" disabled={busy} onClick={async () => {
+              setBusy(true);
+              try {
+                await act(() => orgApi('DELETE', `/users/${p.sub}/avatar`), 'Profile picture removed.');
+                setConfirmAvatar(false);
+              } catch (e) {
+                // act() only throws on a real failure (auth/step-up resolve to
+                // false) — say so and leave the modal open to retry.
+                toast.error(`Couldn't remove the picture. [${e.code || 'error'}]`);
+              } finally {
+                setBusy(false);
+              }
+            }}>Remove picture</button>
+            <button className="btn" disabled={busy} onClick={() => setConfirmAvatar(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
