@@ -267,7 +267,11 @@ r = await api('GET', '/admin/api/keys');
 const keys = await r.json();
 ok(r.status === 200 && keys.keys?.length >= 1 && keys.jwks?.keys?.length >= 1, '13. keys view');
 r = await api('GET', '/admin/api/settings');
-ok(r.status === 200 && (await r.json()).issuer === SSO, '13a. settings view');
+const settingsView = await r.json();
+// live_invite_count backs the "registration is open but nobody can sign up"
+// warning on the Registration card — a missing field would silently hide it.
+ok(r.status === 200 && settingsView.issuer === SSO
+  && typeof settingsView.live_invite_count === 'number', '13a. settings view (+ live invite count)');
 
 // cleanup: disable -> delete -> revoke perm
 await api('POST', `/admin/api/clients/${TESTAPP}/disable`, csrf);

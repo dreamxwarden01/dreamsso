@@ -34,7 +34,14 @@ export function SiteProvider({ children }) {
       setSiteName(name);
       setTurnstileSiteKey(d.turnstile_site_key ?? null);
       setSsoUrl(d.sso_url ?? null);
-      setRegistrationEnabled(d.registration_enabled === true);
+      // Only an EXPLICIT false closes the door. A payload without the flag
+      // (older SSO, degraded proxy) is UNKNOWN, not "off" — treating absent as
+      // false is what turned an upstream hiccup into a "Registration is
+      // closed" card. Unknown falls through to the form and lets the SSO's own
+      // 403 registration_closed be the authority.
+      setRegistrationEnabled(
+        typeof d.registration_enabled === 'boolean' ? d.registration_enabled : null,
+      );
       setInvitationRequired(d.invitation_required !== false);
       try {
         localStorage.setItem(SITE_KEY, name);

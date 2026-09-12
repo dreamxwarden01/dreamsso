@@ -602,7 +602,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 adminRouter.get('/admin/api/settings', async (_req: AdminRequest, res: Response) => {
   const [siteName, portalUrl, mailFrom, cfAccountId, tokenSet, idleDays, maxDays, transientMax, suAdmin, suPortal, suMinutes,
-         tsSiteKey, tsSecretSet, gateJwkRaw, regEnabled, invRequired] =
+         tsSiteKey, tsSecretSet, gateJwkRaw, regEnabled, invRequired, liveInvites] =
     await Promise.all([
       getSetting('site_name', 'DreamSSO'),
       getSetting('account_portal_url', config.accountPortalUrl),
@@ -620,6 +620,15 @@ adminRouter.get('/admin/api/settings', async (_req: AdminRequest, res: Response)
       getSetting('gate_signing_public_jwk'),
       getSetting('enable_registration', 'false'),
       getSetting('require_invitation_code', 'true'),
+      // Registration ON + codes REQUIRED + zero live codes is a dead end —
+      // the portal can only tell the visitor to go find a code that doesn't
+      // exist. Report the count so the toggle can say so where it's set.
+      pool
+        .query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM invitation_codes
+            WHERE used_by IS NULL AND voided_at IS NULL AND expires_at > now()`,
+        )
+        .then((r) => Number(r.rows[0]?.n ?? 0)),
     ]);
   // Edge-gate signing key: only the PUBLIC JWK is stored; surface its identity.
   let gateKey: { kid: string; created_at: string } | null = null;
@@ -654,6 +663,7 @@ adminRouter.get('/admin/api/settings', async (_req: AdminRequest, res: Response)
     gate_key: gateKey,
     enable_registration: regEnabled === 'true',
     require_invitation_code: invRequired === 'true',
+    live_invite_count: liveInvites,
   });
 });
 

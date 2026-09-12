@@ -16,11 +16,21 @@ interface AuthedRequest extends Request {
   sid?: string;
 }
 
-// Public branding passthrough: the SSO owns site_name; the console consumes it via
-// its own origin (no CORS). Cached 60s; serves the stale copy on an SSO hiccup.
+// Public branding + feature flags (registration) passthrough: the SSO owns
+// them; the console consumes them via its own origin (no CORS).
+//
+// The TTL matches the SSO's own settings cache (5s) ON PURPOSE. It used to be
+// 60s, and the mismatch was visible: flipping "Allow registration" lit the
+// "Sign up" link on the SSO login page within seconds while this endpoint kept
+// answering registration_enabled:false, so following that very link landed on
+// a hard "Registration is closed" card for up to a minute.
+const PUB_TTL_MS = 5_000;
+// Past the TTL a stale copy still beats an outage, but a stale FLAG is what
+// caused the above — so cap how long we're willing to answer from it.
+const PUB_STALE_MS = 5 * 60_000;
 let pubCache: { data: unknown; at: number } | null = null;
 apiRouter.get('/api/settings/public', async (_req, res) => {
-  if (pubCache && Date.now() - pubCache.at < 60_000) return res.json(pubCache.data);
+  if (pubCache && Date.now() - pubCache.at < PUB_TTL_MS) return res.json(pubCache.data);
   try {
     const r = await s2sFetch(config.internal + '/api/settings/public', {
       signal: AbortSignal.timeout(3000),
@@ -28,8 +38,13 @@ apiRouter.get('/api/settings/public', async (_req, res) => {
     if (!r.ok) throw new Error('http_' + r.status);
     pubCache = { data: await r.json(), at: Date.now() };
     res.json(pubCache.data);
-  } catch {
-    res.json(pubCache?.data ?? { site_name: null });
+  } catch (e) {
+    // Never invent a payload. `{site_name: null}` looked harmless but every
+    // flag reads as absent, which the client took for "registration off" — an
+    // SSO hiccup showed visitors a closed door. Stale, or honestly unavailable.
+    console.error('public settings fetch failed:', (e as Error).message);
+    if (pubCache && Date.now() - pubCache.at < PUB_STALE_MS) return res.json(pubCache.data);
+    res.status(503).json({ error: 'upstream_unreachable' });
   }
 });
 

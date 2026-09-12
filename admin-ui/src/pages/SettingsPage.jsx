@@ -556,6 +556,16 @@ export default function SettingsPage() {
                 />
                 Require an invitation code (codes are managed in the portal&rsquo;s Organization &rarr; Invitations)
               </label>
+              {/* Both on with no live code = a door nobody can walk through:
+                  every sign-up is turned away for want of a code that doesn't
+                  exist. Say so here rather than let it be discovered. */}
+              {s?.enable_registration && s?.require_invitation_code && s?.live_invite_count === 0 && (
+                <p className="note-warn">
+                  Registration is open but there are no usable invitation codes, so nobody can
+                  sign up yet. Create one in the portal&rsquo;s Organization &rarr; Invitations, or
+                  untick the box above.
+                </p>
+              )}
             </div>
           )}
           {regErr && <p className="err">{regErr}</p>}

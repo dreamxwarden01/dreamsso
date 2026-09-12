@@ -45,12 +45,23 @@ export default function RegisterStartPage() {
   }, [cooldown]);
 
   const codeNeeded = invitationRequired || code.length > 0;
-  const valid = emailOk(email.trim()) && (!codeNeeded || CODE_RE.test(code));
-  const canSubmit = valid && !submitting && (!turnstileSiteKey || turnstileToken) && registrationEnabled !== false;
+  // The code is checked on SUBMIT, not by greying the button: a missing or
+  // malformed code used to leave Continue permanently disabled with nothing
+  // said, which reads as a broken page (and is exactly what happens when an
+  // admin turns registration on before creating any invitation code).
+  const canSubmit = emailOk(email.trim()) && !submitting
+    && (!turnstileSiteKey || turnstileToken) && registrationEnabled !== false;
 
   const submit = async (e) => {
     e?.preventDefault();
     if (phase === 'form' && !canSubmit) return;
+    if (phase === 'form' && codeNeeded && !CODE_RE.test(code)) {
+      // Local check — no request, so the single-use Turnstile token survives.
+      setCodeErr(code
+        ? 'Codes are 12 letters and digits.'
+        : 'An invitation code is required. Ask whoever invited you for one.');
+      return;
+    }
     setSubmitting(true);
     setFormErr(null);
     try {
