@@ -5,7 +5,7 @@
 openapi: 3.1.0
 info:
   title: DreamSSO service-to-service API (mTLS / API Shield)
-  version: "2026-07-13"
+  version: "2026-10-05"
   description: >
     Server-to-server endpoints on sso.dreamxwarden.ca that sit behind the CF
     mTLS require-cert set: OIDC token/userinfo, the RP event channel, and the
@@ -38,6 +38,17 @@ components:
         RFC 7523 private_key_jwt in the form body (not really a cookie; modeled as
         apiKey for tooling). client_assertion_type + client_assertion fields; iss=sub=client_id,
         aud in [issuer, issuer/token], signed by the client's registered key (jwks_uri/jwks).
+    rpQuerySignature:
+      type: http
+      scheme: bearer
+      bearerFormat: Signed RP query JWT
+      description: >
+        EdDSA JWT signed with the registered RP key. typ=backchannel-query+jwt;
+        iss=sub=client_id; a single aud=issuer/backchannel/access-state;
+        integer iat/exp with at most 120 seconds lifetime; UUID jti;
+        action=access-state, method=GET, path=/backchannel/access-state and
+        subjects (1-100 distinct canonical UUIDs) are signed payload claims.
+        Never put this token or the subject selection in query parameters.
     bearerAccessToken:
       type: http
       scheme: bearer
@@ -584,3 +595,74 @@ paths:
         "401": { description: invalid_client }
         "409": { description: email_taken, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { description: invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /backchannel/access-state:
+    get:
+      operationId: backchannelAccessState
+      tags: [events]
+      summary: Read account and current-RP access state with a signed query
+      description: >
+        Read-only, one database snapshot, no role/session mutation. Available to
+        enabled, admin-registered keyed RPs; it accepts UUIDs already known to
+        the requesting backend, not a directory search. The RP can read global
+        account status for supplied UUIDs, even without a prior-login relationship;
+        application roles are always resolved for the authenticated RP only.
+        Treat registered RPs as trusted backends. Do not expose this trust model
+        to untrusted self-service client registrations. No names, email addresses,
+        credentials, organization roles or other RP assignments are returned.
+        Existing account states active/disabled/locked follow the identity and
+        session gate; deleted overrides status, and missing UUIDs return not_found.
+        Unmanaged means no application-role catalog, matching the existing SSO
+        access gate; it does not grant a role. Role-based RPs must require a synced
+        catalog and recognize the role locally. Responses canonicalize subject UUIDs
+        to lowercase and preserve request order. checked_at is query time, not an
+        authorization revision; request_id echoes the signed jti. Consumers must
+        fence in-flight results against newer local event/state changes. Query errors
+        never mean a user was disabled. Ensure the new path is covered by the
+        deployment's edge mTLS policy before remote use; this code change does not
+        update edge policy or deploy a server.
+      security: [ { edgeMutualTLS: [], rpQuerySignature: [] } ]
+      responses:
+        "200":
+          description: Complete state result for every signed requested subject
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [client_id, request_id, checked_at, complete, subjects]
+                properties:
+                  client_id: { type: string }
+                  request_id: { type: string, format: uuid }
+                  checked_at: { type: string, format: date-time }
+                  complete: { type: boolean, const: true }
+                  subjects:
+                    type: array
+                    minItems: 1
+                    maxItems: 100
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [sub, account, rp, allowed]
+                      properties:
+                        sub: { type: string, format: uuid }
+                        account:
+                          type: object
+                          additionalProperties: false
+                          required: [status]
+                          properties:
+                            status: { type: string, enum: [active, disabled, locked, deleted, not_found] }
+                        rp:
+                          type: object
+                          additionalProperties: false
+                          required: [catalog_synced, role_id, role_source, access]
+                          properties:
+                            catalog_synced: { type: boolean }
+                            role_id: { type: [integer, 'null'] }
+                            role_source: { type: string, enum: [override, org, catalog, none] }
+                            access: { type: string, enum: [allowed, no_access, unmanaged, unknown_role] }
+                        allowed: { type: boolean, description: Active account and allowed or unmanaged SSO app gate; not a grant of RP-local permissions }
+        "400": { description: invalid_subjects or query_parameters_not_allowed }
+        "401": { description: invalid_client or invalid_signature }
+        "405": { description: Only GET is supported }
+        "503": { description: access_state_unavailable; upstream key/store failure or incomplete result, never per-user denial }

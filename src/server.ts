@@ -5,7 +5,9 @@ import { getSetting, hasSetting } from './settings.js';
 import { securityHeaders } from './security.js';
 import { wellKnownRouter } from './routes/wellknown.js';
 import { authorizeRouter } from './routes/authorize.js';
-import { tokenRouter } from './routes/token.js';
+import { tokenRouter, clientKeySet } from './routes/token.js';
+import { createAccessStateRouter, type RegisteredClient } from './backchannel/accessState.js';
+import { readAccessStates } from './backchannel/accessStateStore.js';
 import { accountRouter } from './routes/account.js';
 import { avatarRouter } from './routes/avatar.js';
 import { securityRouter } from './routes/security.js';
@@ -98,6 +100,16 @@ app.use(registerRouter);
 app.use(emailChangeRouter);
 app.use(portalTokenRouter);
 app.use(eventsRouter);
+type AccessStateClient = RegisteredClient & Parameters<typeof clientKeySet>[0];
+app.use(createAccessStateRouter<AccessStateClient>({
+  issuer: () => config.issuer,
+  loadClient: async (clientId: string) => {
+    const { rows } = await pool.query<AccessStateClient>('SELECT client_id, jwks, jwks_uri, disabled_at FROM oauth_clients WHERE client_id = $1', [clientId]);
+    return rows[0] ?? null;
+  },
+  keySet: clientKeySet,
+  readStates: (clientId, subjects) => readAccessStates(pool, clientId, subjects),
+}));
 app.use(sessionActivityRouter);
 app.use(orgRouter);
 
