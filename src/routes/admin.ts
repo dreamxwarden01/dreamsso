@@ -12,6 +12,7 @@ import { hasPerm } from '../rbac/index.js';
 import { countAuthenticators } from '../mfa.js';
 import { countPasskeys } from '../webauthn.js';
 import { getJwks, rotateSigningKey, getSigningKey } from '../keys.js';
+import { verifyJwksUri } from '../clientKeys.js';
 import { SignJWT } from 'jose';
 import { s2sFetch } from '../s2sFetch.js';
 import * as mtls from '../mtls.js';
@@ -295,25 +296,6 @@ function validateClientInput(body: Record<string, unknown>): { errors: Record<st
   return { errors, value: v };
 }
 
-// Registration-time key fetch — the "confirm" step of the install flow: the app
-// is expected to be live and serving its JWKS BEFORE it's registered here, so a
-// jwks_uri that can't produce keys right now is a config error, not a race.
-// (Install-time bootstrap for a not-yet-live app = paste the inline JWKS instead.)
-// On success the fetched JWKS is returned and stored alongside the uri as a
-// snapshot: jwks_uri non-null = automatic fetch active (what /token prefers),
-// while the snapshot gives the edit form's paste view real content — saving in
-// paste mode then pins those keys and clears the uri (fetch off).
-async function verifyJwksUri(url: string): Promise<{ error: string | null; jwks?: { keys: unknown[] } }> {
-  try {
-    const r = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(3000) });
-    if (!r.ok) return { error: `JWKS fetch failed (HTTP ${r.status})` };
-    const j = (await r.json().catch(() => null)) as { keys?: unknown[] } | null;
-    if (!j || !Array.isArray(j.keys) || j.keys.length === 0) return { error: 'URL did not return a JWKS with keys' };
-    return { error: null, jwks: j as { keys: unknown[] } };
-  } catch {
-    return { error: 'Could not reach the JWKS URL' };
-  }
-}
 
 interface ClientRow {
   client_id: string;

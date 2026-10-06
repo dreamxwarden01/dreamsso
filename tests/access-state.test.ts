@@ -58,3 +58,39 @@ test('signed GET validation, client scoping, read-only failures and legacy routi
     incomplete = true;assert.equal((await request(good)).status, 503);
   } finally { server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())); }
 });
+
+test('unavailability diagnostics correlate stages without exposing credentials or subjects', async () => {
+  const diagnostics: import('../src/backchannel/accessState.js').AccessStateDiagnostic[] = [];
+  let fault = 'key_config';
+  const secret = 'synthetic-private-error-text';
+  const app = express();
+  app.use(createAccessStateRouter({ issuer: () => ISSUER,
+    loadClient: async () => { if (fault === 'load_client') throw Object.assign(new Error(secret), { code: '08006' });return { client_id: RP, disabled_at: null }; },
+    keySet: (_client, context) => {
+      assert.equal(context?.operation, 'access_state');assert.match(context?.requestId ?? '', /^[0-9a-f-]{36}$/);
+      if (fault === 'key_config') throw new Error(secret);
+      if (fault === 'missing_key') return null;
+      if (fault === 'key_resolution') return async () => { throw Object.assign(new Error(secret), { code: 'EPERM' }); };
+      return createLocalJWKSet({ keys: [jwk] });
+    },
+    readStates: async () => { if (fault === 'read_states') throw Object.assign(new Error(secret), { code: '42703' });return fault === 'read_shape' ? [] : [state]; },
+    diagnostic: event => diagnostics.push(event),
+  }));
+  const server = app.listen(0, '127.0.0.1');await new Promise<void>(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${ACCESS_STATE_PATH}`;
+  try {
+    const good = await signed();
+    for (const stage of ['load_client', 'key_config', 'key_resolution', 'read_states', 'read_shape']) {
+      fault = stage;const response = await fetch(base, { headers: { Authorization: `Bearer ${good}` } });
+      assert.equal(response.status, 503);assert.deepEqual(await response.json(), { error: 'access_state_unavailable' });
+      const event = diagnostics.at(-1)!;assert.equal(event.stage, stage);assert.equal(event.request_id, response.headers.get('x-request-id'));
+      assert.ok(event.elapsed_ms >= 0);
+    }
+    assert.equal(diagnostics[0].error_code, '08006');assert.equal(diagnostics[2].error_code, 'EPERM');assert.equal(diagnostics[3].error_code, '42703');
+    const serialized = JSON.stringify(diagnostics);assert.ok(!serialized.includes(good));assert.ok(!serialized.includes(SUBJECT));assert.ok(!serialized.includes(secret));
+    fault = 'missing_key';assert.equal((await fetch(base, { headers: { Authorization: `Bearer ${good}` } })).status, 401);
+    fault = 'none';assert.equal((await fetch(base, { headers: { Authorization: `Bearer ${await signed({}, { attacker: true })}` } })).status, 401);
+    assert.equal(diagnostics.length, 5);
+    assert.equal((await fetch(base, { headers: { Authorization: `Bearer ${good}` } })).status, 200);
+  } finally { server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())); }
+});

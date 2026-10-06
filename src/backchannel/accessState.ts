@@ -1,5 +1,7 @@
 import { decodeJwt, jwtVerify, errors, type JWTVerifyGetKey } from 'jose';
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
+import { safeKeyError, type ClientKeyContext } from '../clientKeys.js';
 
 export const ACCESS_STATE_PATH = '/backchannel/access-state';
 export const ACCESS_QUERY_TYPE = 'backchannel-query+jwt';
@@ -20,15 +22,34 @@ export interface AccessState {
 export interface AccessStateDependencies<Client extends RegisteredClient> {
   issuer: () => string;
   loadClient: (id: string) => Promise<Client | null>;
-  keySet: (client: Client) => JWTVerifyGetKey | null;
+  keySet: (client: Client, context?: ClientKeyContext) => JWTVerifyGetKey | null;
   readStates: (clientId: string, subjects: readonly string[]) => Promise<AccessState[]>;
   now?: () => Date;
+  diagnostic?: (event: AccessStateDiagnostic) => void;
+}
+export interface AccessStateDiagnostic {
+  event: 'access_state_unavailable';
+  request_id: string;
+  stage: 'load_client' | 'key_config' | 'key_resolution' | 'read_states' | 'read_shape';
+  error_code: string;
+  elapsed_ms: number;
 }
 
 /** A separate signed read operation; never routes requests through the event processor. */
 export function createAccessStateRouter<Client extends RegisteredClient>(deps: AccessStateDependencies<Client>) {
   const router = Router();
   router.all(ACCESS_STATE_PATH, async (req, res) => {
+    const correlationId = randomUUID(), started = performance.now();
+    res.setHeader('X-Request-ID', correlationId);
+    const diagnostic = (stage: AccessStateDiagnostic['stage'], error?: unknown) => {
+      const candidate = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+      const code = (stage === 'load_client' || stage === 'read_states') && typeof candidate === 'string'
+        && /^(?:[0-9]{2}[0-9A-Z]{3}|XX00[0-2])$/.test(candidate) ? candidate : safeKeyError(error).code;
+      const event: AccessStateDiagnostic = { event: 'access_state_unavailable', request_id: correlationId,
+        stage, error_code: code, elapsed_ms: Math.round(performance.now() - started) };
+      try { if (deps.diagnostic) deps.diagnostic(event);else console.warn(JSON.stringify(event)); }
+      catch { /* Logging failure must not turn a rejected request into success. */ }
+    };
     res.set({ 'Cache-Control': 'no-store', Pragma: 'no-cache', 'Referrer-Policy': 'no-referrer' });
     res.vary('Authorization');
     if (req.method !== 'GET') return res.status(405).set('Allow', 'GET').json({ error: 'method_not_allowed' });
@@ -45,11 +66,13 @@ export function createAccessStateRouter<Client extends RegisteredClient>(deps: A
     } catch { return res.status(401).json({ error: 'invalid_signature' }); }
     let client: Client | null;
     try { client = await deps.loadClient(clientId); }
-    catch { return res.status(503).json({ error: 'access_state_unavailable' }); }
+    catch (error) { diagnostic('load_client', error);return res.status(503).json({ error: 'access_state_unavailable' }); }
     if (!client || client.disabled_at) return res.status(401).json({ error: 'invalid_client' });
     const now = deps.now?.() ?? new Date();let subjects: string[], requestId: string, keyResolutionFailed = false;
+    let keySetupComplete = false;
     try {
-      const keys = deps.keySet(client);if (!keys) throw new Error();
+      const keys = deps.keySet(client, { operation: 'access_state', requestId: correlationId });
+      keySetupComplete = true;if (!keys) throw new Error();
       const audience = deps.issuer().replace(/\/$/, '') + ACCESS_STATE_PATH;
       const resolveKeys: JWTVerifyGetKey = async (header, payload) => {
         try { return await keys(header, payload); }
@@ -73,13 +96,19 @@ export function createAccessStateRouter<Client extends RegisteredClient>(deps: A
       subjects = (payload.subjects as string[]).map(value => value.toLowerCase());
       if (new Set(subjects).size !== subjects.length) return res.status(400).json({ error: 'invalid_subjects' });
       requestId = payload.jti;
-    } catch { return res.status(keyResolutionFailed ? 503 : 401).json({ error: keyResolutionFailed ? 'access_state_unavailable' : 'invalid_signature' }); }
+    } catch (error) {
+      const unavailable = !keySetupComplete || keyResolutionFailed;
+      if (unavailable) diagnostic(!keySetupComplete ? 'key_config' : 'key_resolution', error);
+      return res.status(unavailable ? 503 : 401).json({ error: unavailable ? 'access_state_unavailable' : 'invalid_signature' });
+    }
     try {
       const states = await deps.readStates(client.client_id, subjects);
-      if (states.length !== subjects.length || states.some((state, i) => state.sub !== subjects[i])) throw new Error();
+      if (states.length !== subjects.length || states.some((state, i) => state.sub !== subjects[i])) {
+        diagnostic('read_shape');return res.status(503).json({ error: 'access_state_unavailable' });
+      }
       return res.json({ client_id: client.client_id, request_id: requestId,
         checked_at: (deps.now?.() ?? new Date()).toISOString(), complete: true, subjects: states });
-    } catch { return res.status(503).json({ error: 'access_state_unavailable' }); }
+    } catch (error) { diagnostic('read_states', error);return res.status(503).json({ error: 'access_state_unavailable' }); }
   });
   return router;
 }

@@ -15,7 +15,7 @@ import { sendEmail } from '../email.js';
 import { renderPasswordResetEmail, renderPasswordChangedEmail } from '../emailTemplates.js';
 import { renderErrorPage } from '../views.js';
 import { passwordComplexityOk } from './security.js';
-import { clientKeySet } from './token.js';
+import { clientKeySet } from '../clientKeys.js';
 import {
   issueResetToken, getResetToken, bumpResetAttempts, consumeResetToken,
   reserveResetSend, releaseResetSend,
@@ -53,7 +53,7 @@ export async function isPortalAssertion(body: Record<string, unknown>): Promise<
   );
   const client = rows[0];
   if (!client || client.disabled_at) return false;
-  const keySet = clientKeySet(client);
+  const keySet = clientKeySet(client, { operation: 'reset' });
   if (!keySet) return false;
   try {
     await jwtVerify(body.client_assertion, keySet, {

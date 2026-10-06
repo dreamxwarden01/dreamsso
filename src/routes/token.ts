@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import crypto from 'node:crypto';
-import { jwtVerify, createLocalJWKSet, createRemoteJWKSet } from 'jose';
+import { jwtVerify, createLocalJWKSet } from 'jose';
+import { clientKeySet } from '../clientKeys.js';
 import { pool } from '../db.js';
 import { consumeCode } from '../oidc/codes.js';
 import { getSessionWindows } from '../oidc/sessions.js';
@@ -15,26 +16,6 @@ export const tokenRouter = Router();
 const s256 = (verifier: string) => crypto.createHash('sha256').update(verifier).digest('base64url');
 const fail = (res: Response, status: number, error: string, desc?: string) =>
   res.status(status).json(desc ? { error, error_description: desc } : { error });
-
-// Client-key resolution: jwks_uri (preferred in prod — rotation without re-registration)
-// falls back to inline jwks. Remote sets are cached per (client, url); jose handles
-// HTTP caching/cooldown internally, and a changed jwks_uri gets a fresh instance.
-const remoteJwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
-// Exported: the password-reset internal API authenticates the account portal
-// with the same private_key_jwt assertion + key resolution.
-export function clientKeySet(client: { client_id: string; jwks_uri: string | null; jwks: Parameters<typeof createLocalJWKSet>[0] | null }) {
-  if (client.jwks_uri) {
-    const cacheKey = `${client.client_id}|${client.jwks_uri}`;
-    let set = remoteJwks.get(cacheKey);
-    if (!set) {
-      set = createRemoteJWKSet(new URL(client.jwks_uri), { timeoutDuration: 3000 });
-      remoteJwks.set(cacheKey, set);
-    }
-    return set;
-  }
-  if (client.jwks) return createLocalJWKSet(client.jwks);
-  return null;
-}
 
 tokenRouter.post('/token', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -61,7 +42,7 @@ tokenRouter.post('/token', async (req: Request, res: Response) => {
   const client = rows[0];
   if (!client) return fail(res, 401, 'invalid_client', 'unknown client');
   if (client.disabled_at) return fail(res, 401, 'invalid_client', 'client disabled');
-  const keySet = clientKeySet(client);
+  const keySet = clientKeySet(client, { operation: 'token' });
   if (!keySet) return fail(res, 401, 'invalid_client', 'no registered key');
   try {
     await jwtVerify(b.client_assertion, keySet, {

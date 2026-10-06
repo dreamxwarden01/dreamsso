@@ -1,7 +1,7 @@
 import { jwtVerify } from 'jose';
 import { pool } from '../db.js';
 import { config } from '../config.js';
-import { clientKeySet } from '../routes/token.js';
+import { clientKeySet } from '../clientKeys.js';
 
 // Generic inbound client-assertion check (any enabled client, not just the
 // portal): the assertion's iss names the client; verified against its registered
@@ -35,7 +35,7 @@ export async function assertedClient(body: Record<string, unknown>): Promise<str
   );
   const client = rows[0];
   if (!client || client.disabled_at) return null;
-  const keySet = clientKeySet(client);
+  const keySet = clientKeySet(client, { operation: 'client_assertion' });
   if (!keySet) return null;
   try {
     await jwtVerify(body.client_assertion, keySet, {

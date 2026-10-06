@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { jwtVerify } from 'jose';
 import { pool } from '../db.js';
 import { config } from '../config.js';
-import { clientKeySet } from './token.js';
+import { clientKeySet } from '../clientKeys.js';
 import { effectiveAppRole } from '../rbac/appRoles.js';
 import { enqueueEvents } from '../events.js';
 import { audit } from '../audit.js';
@@ -42,7 +42,7 @@ eventsRouter.post('/backchannel/events', async (req: Request, res: Response) => 
     [iss],
   );
   if (!client || client.disabled_at) return res.status(401).json({ error: 'unknown_client' });
-  const keySet = clientKeySet(client);
+  const keySet = clientKeySet(client, { operation: 'events' });
   if (!keySet) return res.status(401).json({ error: 'no_registered_key' });
 
   let payload;
