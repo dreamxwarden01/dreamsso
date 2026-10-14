@@ -8,13 +8,22 @@ import { sealSecret, openSecret } from './secretbox.js';
 const ENC_PREFIX = 'enc:v1:';
 const TTL_MS = 5_000;
 const cache = new Map<string, { v: string | null; at: number }>();
+const cacheVersions = new Map<string, number>();
+
+// Call after a transaction commits a setting through its own connection.
+export function invalidateSettingCache(key: string): void {
+  cache.delete(key);
+  cacheVersions.set(key, (cacheVersions.get(key) ?? 0) + 1);
+}
 
 async function readRaw(key: string): Promise<string | null> {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.v;
+  const version = cacheVersions.get(key) ?? 0;
   const { rows } = await pool.query<{ value: string }>('SELECT value FROM settings WHERE key = $1', [key]);
   const v = rows[0]?.value ?? null;
-  cache.set(key, { v, at: Date.now() });
+  // A read begun before an invalidation must not repopulate stale cache data.
+  if ((cacheVersions.get(key) ?? 0) === version) cache.set(key, { v, at: Date.now() });
   return v;
 }
 
@@ -44,6 +53,7 @@ async function writeRaw(key: string, value: string | null): Promise<void> {
       [key, value],
     );
   }
+  invalidateSettingCache(key);
   cache.set(key, { v: value == null || value === '' ? null : value, at: Date.now() });
 }
 

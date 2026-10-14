@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { pool } from '../db.js';
 import { getSetting } from '../settings.js';
 import { fanOutLogout } from './backchannel.js';
+import { stepupStampFresh, stepupValidityMinutes } from './stepupRules.js';
 
 export const SESSION_COOKIE = 'sso_session';
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest();
@@ -56,8 +57,7 @@ export function methodFromAmr(amr: string[]): StepupMethod {
 }
 
 export async function getStepupValidityMinutes(): Promise<number> {
-  const n = parseInt((await getSetting('stepup_validity_minutes')) ?? '', 10);
-  return Number.isFinite(n) && n >= 1 && n <= 1440 ? n : 30;
+  return stepupValidityMinutes(await getSetting('stepup_validity_minutes'));
 }
 
 // Stamp a fresh sudo window on `sid`, recording WHICH method was proven. Gates
@@ -70,7 +70,7 @@ export async function stampStepup(sid: string, method: StepupMethod): Promise<vo
 export async function isStepupFresh(stepupAt: number | null): Promise<boolean> {
   if (!stepupAt) return false;
   const minutes = await getStepupValidityMinutes();
-  return Date.now() / 1000 - stepupAt < minutes * 60;
+  return stepupStampFresh(stepupAt, minutes);
 }
 
 export interface NewSession {

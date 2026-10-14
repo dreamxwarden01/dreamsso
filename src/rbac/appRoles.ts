@@ -1,3 +1,4 @@
+import type pg from 'pg';
 import { pool } from '../db.js';
 
 // Effective app role resolution — the three-layer chain the Org UI edits:
@@ -14,20 +15,20 @@ export interface EffectiveAppRole {
   source: 'override' | 'org' | 'catalog' | 'none';
 }
 
-export async function effectiveAppRole(sub: string, clientId: string): Promise<EffectiveAppRole> {
-  const { rows: [ov] } = await pool.query<{ app_role_id: number | null }>(
+export async function effectiveAppRole(sub: string, clientId: string, db: pg.Pool | pg.PoolClient = pool): Promise<EffectiveAppRole> {
+  const { rows: [ov] } = await db.query<{ app_role_id: number | null }>(
     'SELECT app_role_id FROM user_app_role_overrides WHERE user_sub = $1 AND client_id = $2',
     [sub, clientId],
   );
   if (ov) return { role_id: ov.app_role_id, source: 'override' };
-  const { rows: [od] } = await pool.query<{ app_role_id: number | null }>(
+  const { rows: [od] } = await db.query<{ app_role_id: number | null }>(
     `SELECT d.app_role_id FROM org_role_app_defaults d
        JOIN user_org_roles ur ON ur.org_role_slug = d.role_slug
       WHERE ur.user_sub = $1 AND d.client_id = $2`,
     [sub, clientId],
   );
   if (od) return { role_id: od.app_role_id, source: 'org' };
-  const { rows: [cat] } = await pool.query<{ default_role_id: number | null }>(
+  const { rows: [cat] } = await db.query<{ default_role_id: number | null }>(
     'SELECT default_role_id FROM app_role_catalogs WHERE client_id = $1',
     [clientId],
   );
@@ -37,9 +38,9 @@ export async function effectiveAppRole(sub: string, clientId: string): Promise<E
 
 // Privilege level of an app-role VALUE for guard comparisons. Smaller = more
 // privileged; No access (null) and vanished roles rank below everything.
-export async function appRoleLevel(clientId: string, roleId: number | null): Promise<number> {
+export async function appRoleLevel(clientId: string, roleId: number | null, db: pg.Pool | pg.PoolClient = pool): Promise<number> {
   if (roleId == null) return Number.POSITIVE_INFINITY;
-  const { rows: [r] } = await pool.query<{ level: number }>(
+  const { rows: [r] } = await db.query<{ level: number }>(
     'SELECT level FROM app_roles WHERE client_id = $1 AND role_id = $2',
     [clientId, roleId],
   );

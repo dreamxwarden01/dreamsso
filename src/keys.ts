@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import type pg from 'pg';
 import {
   generateKeyPair, exportJWK, exportPKCS8, importPKCS8, calculateJwkThumbprint,
   type JWK, type JSONWebKeySet,
@@ -67,15 +68,19 @@ const RETIRED_JWKS_WINDOW = "interval '24 hours'";
 let jwksCache: { value: JSONWebKeySet; at: number } | null = null;
 const JWKS_CACHE_MS = 60_000;
 
-export async function getJwks(): Promise<JSONWebKeySet> {
-  if (jwksCache && Date.now() - jwksCache.at < JWKS_CACHE_MS) return jwksCache.value;
-  const { rows } = await pool.query(
+export async function getJwks(db?: pg.PoolClient): Promise<JSONWebKeySet> {
+  if (!db && jwksCache && Date.now() - jwksCache.at < JWKS_CACHE_MS) return jwksCache.value;
+  const { rows } = await (db ?? pool).query(
     `SELECT public_jwk FROM signing_keys
       WHERE status IN ('current','next')
          OR (status = 'retired' AND retired_at > now() - ${RETIRED_JWKS_WINDOW})
       ORDER BY created_at DESC`,
   );
-  jwksCache = { value: { keys: rows.map((r) => r.public_jwk as JWK) }, at: Date.now() };
+  const value = { keys: rows.map((r) => r.public_jwk as JWK) };
+  // Transactional proof checks must neither acquire another pool connection
+  // nor share uncommitted/public-key snapshots through the process cache.
+  if (db) return value;
+  jwksCache = { value, at: Date.now() };
   return jwksCache.value;
 }
 

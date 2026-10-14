@@ -21,8 +21,8 @@ against.
 
 - **Single org, role-based RBAC** (not multi-tenant): `superadmin` / `admin` / `standard_user`, plus
   per-user permission overrides and per-app role catalogs.
-- **The SSO owns identity; relying parties own authorization.** Each RP keeps its own roles and
-  re-checks them; the SSO federates *who you are*, not *what you can do* in each app.
+- **The SSO owns identity and effective app-role assignments.** Each relying party owns its role
+  catalog, defines what those roles permit, and enforces access in its application.
 - **Registration is `jwks_uri`, never a key handoff.** Each RP (and the portal BFF) self-mints an
   Ed25519 client key and serves the public half at `/.well-known/jwks.json`; the SSO stores only the
   URL and fetches it lazily. Client-key rotation needs no re-registration.
@@ -51,10 +51,38 @@ The S2S API schemas (for Cloudflare API Shield) live in [`docs/security/`](docs/
 ## Tests
 
 ```bash
-npm test                        # SSO installer + mTLS suites
-node scripts/sso-org-admin-test.ts     # org-management / RBAC guard matrix
-# …plus the per-feature suites in scripts/ (reset, registration, email-change, step-up, …)
+npm run typecheck
+npm run test:events              # Synthetic role/event and HTTP regressions
+npm run test:events:db           # Disposable local PostgreSQL integration tests
 ```
+
+Database tests use the `orbstack` Docker context by default. Set
+`DREAMSSO_TEST_DOCKER_CONTEXT` to select another context. The runner creates its
+own database and credentials and removes the container afterward. Feature scripts
+under `scripts/` may require a separately configured test instance.
+
+## Role synchronization
+
+Relying parties publish persistent, versioned catalog snapshots. Role updates and
+their outbound notifications share a PostgreSQL transaction, so delivery can
+resume after a worker restart or temporary receiver outage. Retries preserve the
+event ID and payload while refreshing the signed envelope.
+Receivers acknowledge processed or duplicate batches with exactly `204 No Content`.
+Other responses, including `200` HTML from an intermediary, remain retryable failures.
+
+`account.roles_change` carries `sub`, `role_id`, `authority_epoch` and
+`authority_revision`. The revision is a decimal string; receivers track it per
+subject within its epoch. ID tokens carry the corresponding `app_role_epoch` and
+`app_role_revision` claims. Signed access-state queries return the same metadata
+in response headers without changing the JSON body. See the
+[service-to-service API](docs/security/openapi-sso-s2s.yaml).
+
+Upgrade the SSO schema and server before upgrading relying parties. Preserve
+catalog and authority metadata with database backups; a foreign epoch requires
+explicit recovery. The migration requests a fresh catalog and republishes current
+roles during reconciliation. It does not reconstruct previously lost history.
+After receivers adopt versioned authority, rolling back the SSO alone can prevent
+sign-in; coordinate rollback across the identity provider and its relying parties.
 
 ## Security
 

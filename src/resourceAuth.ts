@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import type pg from 'pg';
 import { jwtVerify, createLocalJWKSet } from 'jose';
 import { getJwks } from './keys.js';
 import { config } from './config.js';
@@ -15,11 +16,14 @@ export interface AuthedRequest extends Request {
   auth?: ResourceAuth;
 }
 
-export async function verifyAccessToken(req: Request): Promise<ResourceAuth | null> {
+export async function verifyAccessToken(req: Request, db?: pg.PoolClient): Promise<ResourceAuth | null> {
   const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
   if (!m) return null;
+  // A transaction-owned storage failure is unavailability, not evidence of an
+  // invalid bearer token. Let the caller roll back and return its 503 response.
+  const transactionKeys = db ? await getJwks(db) : undefined;
   try {
-    const jwks = createLocalJWKSet(await getJwks());
+    const jwks = createLocalJWKSet(transactionKeys ?? await getJwks());
     const { payload } = await jwtVerify(m[1], jwks, { issuer: config.issuer, audience: config.issuer });
     if (!payload.sub) return null;
     return { sub: payload.sub, scopes: String(payload.scope ?? '').split(' ').filter(Boolean) };

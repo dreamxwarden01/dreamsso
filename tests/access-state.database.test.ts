@@ -19,12 +19,15 @@ test('current account and RP state resolution in an isolated real PostgreSQL fix
       CREATE TABLE identities (sub uuid PRIMARY KEY, status text NOT NULL, deleted_at timestamptz);
       CREATE TABLE app_roles (client_id text, role_id integer, PRIMARY KEY(client_id,role_id));
       CREATE TABLE app_role_catalogs (client_id text PRIMARY KEY, default_role_id integer);
+      CREATE TABLE app_role_sync_state (client_id text PRIMARY KEY, authority_epoch uuid NOT NULL, authority_revision bigint NOT NULL);
       CREATE TABLE user_app_role_overrides (user_sub uuid,client_id text,app_role_id integer,PRIMARY KEY(user_sub,client_id));
       CREATE TABLE user_org_roles (user_sub uuid,org_role_slug text,PRIMARY KEY(user_sub,org_role_slug),UNIQUE(user_sub));
       CREATE TABLE org_role_app_defaults (role_slug text,client_id text,app_role_id integer,PRIMARY KEY(role_slug,client_id));
       INSERT INTO oauth_clients VALUES ('a',NULL),('b',NULL),('unmanaged',NULL);
       INSERT INTO app_roles VALUES ('a',1),('a',2),('b',9);
       INSERT INTO app_role_catalogs VALUES ('a',1),('b',9);
+      INSERT INTO app_role_sync_state VALUES ('a','11111111-1111-4111-8111-111111111111',0),
+        ('b','22222222-2222-4222-8222-222222222222',0),('unmanaged','33333333-3333-4333-8333-333333333333',0);
       INSERT INTO org_role_app_defaults VALUES ('member','a',2),('blocked','a',NULL);
     `);
     for (const id of [A,B,C,D]) await db.query("INSERT INTO identities VALUES ($1,'active',NULL)",[id]);

@@ -2,6 +2,8 @@ import { pool } from '../db.js';
 import { countPasskeys } from '../webauthn.js';
 import { countAuthenticators } from '../mfa.js';
 import { maskEmail } from '../emailOtp.js';
+import { acceptedStrongStepup } from './stepupRules.js';
+export { stepupSatisfies } from './stepupRules.js';
 
 // The tiered step-up policy — ONE place that decides which methods a scenario
 // will accept for a given user, so the enforcement gates, the /status probe, and
@@ -26,7 +28,7 @@ export async function acceptedStepupMethods(sub: string, mode: StepupMode): Prom
   const [passkeys, totp] = await Promise.all([countPasskeys(sub), countAuthenticators(sub)]);
 
   if (mode === 'strong-mandatory') {
-    const accepted = passkeys > 0 ? ['passkey'] : totp > 0 ? ['totp'] : [];
+    const accepted = acceptedStrongStepup(passkeys, totp);
     return { accepted, enroll_required: accepted.length === 0 };
   }
 
@@ -51,11 +53,4 @@ export async function acceptedStepupMethods(sub: string, mode: StepupMode): Prom
     return { accepted: ['email'], enroll_required: false, masked_email: maskEmail(id!.email!) };
   }
   return { accepted: ['password'], enroll_required: false };
-}
-
-// A session's recorded step-up satisfies a scenario iff it is fresh AND its method
-// is in the accepted set. A null/unknown method never satisfies — the safe default
-// that forces one re-verification (e.g. legacy rows, or a login below the bar).
-export function stepupSatisfies(accepted: string[], method: string | null, fresh: boolean): boolean {
-  return fresh && method != null && accepted.includes(method);
 }

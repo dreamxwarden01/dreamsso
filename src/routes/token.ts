@@ -6,7 +6,7 @@ import { pool } from '../db.js';
 import { consumeCode } from '../oidc/codes.js';
 import { getSessionWindows } from '../oidc/sessions.js';
 import { mintIdToken, mintAccessToken } from '../oidc/tokens.js';
-import { effectiveAppRole, hasAppCatalog } from '../rbac/appRoles.js';
+import { readAccessStateSnapshot } from '../backchannel/accessStateStore.js';
 import { getJwks } from '../keys.js';
 import { config } from '../config.js';
 import { getSetting } from '../settings.js';
@@ -120,10 +120,17 @@ tokenRouter.post('/token', async (req: Request, res: Response) => {
   // OWN role_id (the ids it reported in roles.sync). The RP applies it at the
   // callback like an event report: update + cache purge when it differs.
   // Absent for catalog-less clients (the account portal has no role model).
-  if (await hasAppCatalog(client.client_id)) {
-    const eff = await effectiveAppRole(ac.userSub, client.client_id);
-    if (eff.role_id != null) extra.app_role = eff.role_id;
-  }
+  try {
+    const snapshot = await readAccessStateSnapshot(pool, client.client_id, [ac.userSub]);
+    const state = snapshot.states[0];
+    if (snapshot.states.length !== 1 || !state.allowed) return fail(res, 403, 'access_denied');
+    if (state.rp.catalog_synced) {
+      if (!snapshot.authority) return fail(res, 503, 'temporarily_unavailable');
+      extra.app_role = state.rp.role_id;
+      extra.app_role_epoch = snapshot.authority.epoch;
+      extra.app_role_revision = snapshot.authority.revision;
+    }
+  } catch { return fail(res, 503, 'temporarily_unavailable'); }
 
   const id_token = await mintIdToken({
     sub: ac.userSub, clientId: client.client_id, nonce: ac.nonce, acr: ac.acr, amr: ac.amr, authTime: ac.authTime, sid: ac.sid, extra,

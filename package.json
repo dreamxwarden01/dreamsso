@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "migrate": "tsx scripts/migrate.ts"
+    "migrate": "tsx scripts/migrate.ts",
+    "test:events": "node --import tsx --test tests/roles-sync.test.ts tests/events-http.test.ts tests/event-outbox.test.ts tests/role-authority-http.test.ts tests/settings-cache.test.ts tests/org-proof.test.ts tests/access-state.test.ts tests/client-keys.test.ts",
+    "test:events:db": "node tests/run-role-events-db.mjs"
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",

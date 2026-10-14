@@ -8,7 +8,7 @@ import { authorizeRouter } from './routes/authorize.js';
 import { tokenRouter } from './routes/token.js';
 import { clientKeySet } from './clientKeys.js';
 import { createAccessStateRouter, type RegisteredClient } from './backchannel/accessState.js';
-import { readAccessStates } from './backchannel/accessStateStore.js';
+import { readAccessStates, readAccessStateSnapshot } from './backchannel/accessStateStore.js';
 import { accountRouter } from './routes/account.js';
 import { avatarRouter } from './routes/avatar.js';
 import { securityRouter } from './routes/security.js';
@@ -21,6 +21,7 @@ import { registerRouter } from './routes/register.js';
 import { emailChangeRouter } from './routes/emailChangeRoutes.js';
 import { portalTokenRouter } from './routes/portalToken.js';
 import { eventsRouter } from './routes/events.js';
+import { EVENT_PATH, eventForm } from './backchannel/eventForm.js';
 import { sessionActivityRouter } from './routes/sessionActivity.js';
 import { orgRouter } from './routes/org.js';
 import { setupGate, setupRouter } from './routes/setup.js';
@@ -53,13 +54,14 @@ app.use((_req, res, next) => {
 });
 app.use(securityHeaders);
 app.use(cookieParser());
+// The setup gate still protects the event channel before any body is parsed.
+app.use(setupGate);
+app.use(EVENT_PATH, eventForm);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json()); // resource APIs (e.g. /account/*) take JSON bodies
 
-// First-run setup gate (mounted before all app routes): while the install is
-// incomplete, only /setup (token-gated) and a tiny whitelist are reachable —
-// everything else gets the neutral 503. Once complete it's a no-op (and /setup 404s).
-app.use(setupGate);
+// Only the setup router and its tiny whitelist can pass the gate above while
+// installation is incomplete. Ordinary form and JSON routes keep their limits.
 app.use(setupRouter);
 
 // The bare SSO hostname is not a destination — send end users to the account portal.
@@ -110,6 +112,7 @@ app.use(createAccessStateRouter<AccessStateClient>({
   },
   keySet: clientKeySet,
   readStates: (clientId, subjects) => readAccessStates(pool, clientId, subjects),
+  readSnapshot: (clientId, subjects) => readAccessStateSnapshot(pool, clientId, subjects),
 }));
 app.use(sessionActivityRouter);
 app.use(orgRouter);
@@ -150,11 +153,10 @@ async function main() {
     return;
   }
 
-  // Schema first, before anything touches the tables. Lenient by design: a
-  // migration failure is logged and the SSO still comes up, because a running
-  // identity provider is more useful than one that refuses to start — the
-  // installer runs the same thing in strict mode, where the opposite is true.
-  await runMigrations();
+  // Authentication and event delivery depend on the current schema. Refuse a
+  // configured boot after migration failure instead of serving broken routes.
+  // The unconfigured installer branch above still starts without a database.
+  await runMigrations({ strict: true });
 
   const { kid } = await getSigningKey();
   // DB backstop: prune sessions past the idle/absolute windows (hourly + at boot).

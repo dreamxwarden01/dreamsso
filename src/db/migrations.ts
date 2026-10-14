@@ -61,10 +61,9 @@ export interface MigrationResult {
   baselined: string[];
 }
 
-// strict = the installer: a failure must surface, because reporting a successful
-// install on top of a broken schema is worse than failing loudly.
-// lenient (boot, the default) = log and keep serving; a running SSO is more
-// useful than one that refuses to start over a migration that may not matter yet.
+// The installer and configured startup use strict mode: required schema must
+// be available before they report success. Explicit lenient callers retain the
+// historical best-effort behavior.
 // `pool` is for the installer, which runs before the app's own pool is pointed at
 // the freshly configured database.
 export async function runMigrations(
@@ -87,7 +86,8 @@ export async function runMigrations(
     try {
       files = fs.readdirSync(DIR).filter((f) => f.endsWith('.sql')).sort();
     } catch {
-      // No directory (e.g. a trimmed deploy) — nothing to do, and not an error.
+      if (strict) throw new Error('Migration directory is unavailable.');
+      // Preserve the historical best-effort behavior only for lenient callers.
       return result;
     }
 

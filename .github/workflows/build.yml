@@ -11,6 +11,7 @@ on:
       - 'admin-ui/**'
       - 'account/**'
       - 'db/**'
+      - 'tests/**'
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig.json'
@@ -23,7 +24,24 @@ permissions:
   packages: write
 
 jobs:
+  verify-role-events:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run test:events
+      - run: npm run test:events:db
+        env:
+          DREAMSSO_TEST_DOCKER_CONTEXT: default
   build:
+    needs: verify-role-events
     runs-on: ubuntu-latest
     strategy:
       matrix:

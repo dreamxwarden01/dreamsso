@@ -5,7 +5,7 @@
 openapi: 3.1.0
 info:
   title: DreamSSO service-to-service API (mTLS / API Shield)
-  version: "2026-10-05"
+  version: "2026-10-14"
   description: >
     Server-to-server endpoints on sso.dreamxwarden.ca that sit behind the CF
     mTLS require-cert set: OIDC token/userinfo, the RP event channel, and the
@@ -117,6 +117,8 @@ paths:
                 required: [access_token, token_type, expires_in, id_token, scope]
         "400": { description: Bad grant/PKCE, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "401": { description: Client auth failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: Current account or app access denied (access_denied), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Current role authority unavailable (temporarily_unavailable), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /userinfo:
     get:
       operationId: oidcUserinfo
@@ -150,7 +152,19 @@ paths:
       summary: RP -> SSO event channel (roles.sync, ...)
       description: >
         event_token is a JWT signed with the RP's registered client key
-        (iss=client_id, aud=issuer, iat, jti, events:[{id,type,payload}]).
+        (typ=events+jwt, iss=client_id, aud=issuer, iat, exp, jti,
+        events:[{id,type,payload}]). The form contains only event_token, a compact
+        JWT of at most 262144 bytes; the encoded form limit is 263168 bytes.
+        A roles.sync payload contains site_name, roles and default_role. Explicit
+        null means no default access; numeric role 0 remains a distinct role.
+        Send catalog_epoch (a persistent UUID) and catalog_revision (a canonical
+        positive decimal string up to 9223372036854775807) together. Persist the
+        snapshot and event ID before delivery and reuse both on retries.
+        Legacy same-second snapshots with different contents return 409.
+        After a revisioned catalog is accepted, unversioned or foreign-epoch
+        catalogs are rejected. Older revisions are acknowledged without changes;
+        equal revisions must have identical catalog contents. Inbox records,
+        catalog mutations and affected-user role notifications commit together.
       security: [ { edgeMutualTLS: [] } ]
       requestBody:
         required: true
@@ -158,6 +172,7 @@ paths:
           application/x-www-form-urlencoded:
             schema:
               type: object
+              additionalProperties: false
               properties:
                 event_token: { type: string, maxLength: 262144 }
               required: [event_token]
@@ -165,7 +180,10 @@ paths:
         "204": { description: Accepted (all events processed/deduped) }
         "400": { description: missing/malformed token or invalid events, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "401": { description: unknown_client / invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-        "500": { description: processing_failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Catalog ordering, lineage or immutable event-identity conflict, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "413": { description: Encoded form exceeds the event endpoint limit }
+        "415": { description: Unsupported content type or compressed form }
+        "503": { description: events_unavailable; retry the same event ID and payload with a fresh signed envelope, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /internal/avatar:
     post:
       operationId: internalAvatarFetch
@@ -617,7 +635,9 @@ paths:
         catalog and recognize the role locally. Responses canonicalize subject UUIDs
         to lowercase and preserve request order. checked_at is query time, not an
         authorization revision; request_id echoes the signed jti. Consumers must
-        fence in-flight results against newer local event/state changes. Query errors
+        use the paired authority headers for role ordering and fence in-flight
+        results against newer local observations. Role revisions do not version
+        account status. Query errors
         never mean a user was disabled. Ensure the new path is covered by the
         deployment's edge mTLS policy before remote use; this code change does not
         update edge policy or deploy a server.
@@ -625,6 +645,13 @@ paths:
       responses:
         "200":
           description: Complete state result for every signed requested subject
+          headers:
+            X-DreamSSO-Authority-Epoch:
+              description: Persistent role-authority lineage for this RP; absent for an unmanaged RP. Both authority headers come from the same database snapshot as the body.
+              schema: { type: string, format: uuid }
+            X-DreamSSO-Authority-Revision:
+              description: Nonnegative decimal role revision up to 9223372036854775807; compare per subject, alongside the epoch. Absent together with the epoch for an unmanaged RP.
+              schema: { type: string, pattern: '^(0|[1-9][0-9]{0,18})$' }
           content:
             application/json:
               schema:

@@ -19,11 +19,16 @@ export interface AccessState {
     role_source: 'override' | 'org' | 'catalog' | 'none'; access: 'allowed' | 'no_access' | 'unmanaged' | 'unknown_role' };
   allowed: boolean;
 }
+export interface AccessStateSnapshot {
+  states: AccessState[];
+  authority: { epoch: string; revision: string } | null;
+}
 export interface AccessStateDependencies<Client extends RegisteredClient> {
   issuer: () => string;
   loadClient: (id: string) => Promise<Client | null>;
   keySet: (client: Client, context?: ClientKeyContext) => JWTVerifyGetKey | null;
   readStates: (clientId: string, subjects: readonly string[]) => Promise<AccessState[]>;
+  readSnapshot?: (clientId: string, subjects: readonly string[]) => Promise<AccessStateSnapshot>;
   now?: () => Date;
   diagnostic?: (event: AccessStateDiagnostic) => void;
 }
@@ -102,9 +107,28 @@ export function createAccessStateRouter<Client extends RegisteredClient>(deps: A
       return res.status(unavailable ? 503 : 401).json({ error: unavailable ? 'access_state_unavailable' : 'invalid_signature' });
     }
     try {
-      const states = await deps.readStates(client.client_id, subjects);
+      const snapshot = deps.readSnapshot ? await deps.readSnapshot(client.client_id, subjects) : null;
+      if (deps.readSnapshot && (!snapshot || !Array.isArray(snapshot.states))) {
+        diagnostic('read_shape');return res.status(503).json({ error: 'access_state_unavailable' });
+      }
+      const states = snapshot ? snapshot.states : await deps.readStates(client.client_id, subjects);
       if (states.length !== subjects.length || states.some((state, i) => state.sub !== subjects[i])) {
         diagnostic('read_shape');return res.status(503).json({ error: 'access_state_unavailable' });
+      }
+      if (snapshot) {
+        const managed = states.some(state => state.rp.catalog_synced);
+        if (states.some(state => state.rp.catalog_synced !== managed)
+          || (managed ? !snapshot.authority : snapshot.authority !== null)) {
+          diagnostic('read_shape');return res.status(503).json({ error: 'access_state_unavailable' });
+        }
+      }
+      if (snapshot?.authority) {
+        const { epoch, revision } = snapshot.authority;
+        if (typeof epoch !== 'string' || typeof revision !== 'string' || !UUID.test(epoch)
+          || !/^(0|[1-9][0-9]{0,18})$/.test(revision) || BigInt(revision) > 9223372036854775807n) {
+          diagnostic('read_shape');return res.status(503).json({ error: 'access_state_unavailable' });
+        }
+        res.set({ 'X-DreamSSO-Authority-Epoch': epoch, 'X-DreamSSO-Authority-Revision': revision });
       }
       return res.json({ client_id: client.client_id, request_id: requestId,
         checked_at: (deps.now?.() ?? new Date()).toISOString(), complete: true, subjects: states });

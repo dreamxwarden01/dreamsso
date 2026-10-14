@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import argon2 from 'argon2';
 import { uuidv7 } from 'uuidv7';
 import { pool } from '../db.js';
+import { resolveRegistrationRole } from '../registrationRole.js';
 import { config } from '../config.js';
 import { getSetting, hasSetting } from '../settings.js';
 import { createSession, clientGeo } from '../oidc/sessions.js';
@@ -181,13 +182,13 @@ registerRouter.post('/internal/register/complete', async (req: Request, res: Res
     if (!invite) return res.status(409).json({ error: 'invitation_gone' });
     roleSlug = invite.invited_role_slug;
   }
-  if (!roleSlug) roleSlug = (await getSetting('default_org_role', 'standard_user'))!;
 
   const sub = uuidv7();
   const hash = await argon2.hash(password, { type: argon2.argon2id });
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
+    roleSlug = await resolveRegistrationRole(c, roleSlug);
     // email_verified: the emailed link proved ownership of the address.
     await c.query(
       `INSERT INTO identities (sub, username, display_name, email, email_verified, password_hash, password_changed_at)
@@ -201,6 +202,9 @@ registerRouter.post('/internal/register/complete', async (req: Request, res: Res
     // TOCTOU: a concurrent duplicate slipped past the SELECT — map, don't 500.
     if ((e as { code?: string }).code === '23505') {
       return res.status(422).json({ errors: { username: 'username_taken' } });
+    }
+    if (['55P03', '57014'].includes((e as { code?: string }).code ?? '')) {
+      return res.status(503).json({ error: 'registration_unavailable' });
     }
     throw e;
   } finally {

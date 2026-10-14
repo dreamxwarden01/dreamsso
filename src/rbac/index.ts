@@ -1,3 +1,4 @@
+import type pg from 'pg';
 import type { Response, NextFunction } from 'express';
 import { pool } from '../db.js';
 import type { AuthedRequest } from '../resourceAuth.js';
@@ -13,25 +14,13 @@ export interface UserAuthz {
   granted: ReadonlySet<string>; // effective granted permission keys
 }
 
-export async function resolveAuthz(userSub: string): Promise<UserAuthz> {
-  const [{ rows: roleRows }, { rows: roleEff }, { rows: overrides }] = await Promise.all([
-    pool.query<{ slug: string; level: number }>(
-      `SELECT r.slug, r.level FROM user_org_roles ur
-         JOIN org_roles r ON r.slug = ur.org_role_slug
-        WHERE ur.user_sub = $1 LIMIT 1`,
-      [userSub],
-    ),
-    pool.query<{ perm_key: string; effect: Effect }>(
-      `SELECT rp.perm_key, rp.effect FROM role_permissions rp
-         JOIN user_org_roles ur ON ur.org_role_slug = rp.role_slug
-        WHERE ur.user_sub = $1`,
-      [userSub],
-    ),
-    pool.query<{ perm_key: string; effect: Effect }>(
-      `SELECT perm_key, effect FROM user_permission_overrides WHERE user_sub = $1`,
-      [userSub],
-    ),
-  ]);
+export async function resolveAuthz(userSub: string, db: pg.Pool | pg.PoolClient = pool): Promise<UserAuthz> {
+  const { rows: roleRows } = await db.query<{ slug: string; level: number }>(
+    `SELECT r.slug,r.level FROM user_org_roles ur JOIN org_roles r ON r.slug=ur.org_role_slug WHERE ur.user_sub=$1 LIMIT 1`, [userSub]);
+  const { rows: roleEff } = await db.query<{ perm_key: string; effect: Effect }>(
+    `SELECT rp.perm_key,rp.effect FROM role_permissions rp JOIN user_org_roles ur ON ur.org_role_slug=rp.role_slug WHERE ur.user_sub=$1`, [userSub]);
+  const { rows: overrides } = await db.query<{ perm_key: string; effect: Effect }>(
+    'SELECT perm_key,effect FROM user_permission_overrides WHERE user_sub=$1', [userSub]);
 
   const roleEffect = new Map(roleEff.map((r) => [r.perm_key, r.effect]));
   const override = new Map(overrides.map((r) => [r.perm_key, r.effect]));
