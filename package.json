@@ -10,7 +10,11 @@
     "typecheck": "tsc --noEmit",
     "migrate": "tsx scripts/migrate.ts",
     "test:events": "node --import tsx --test tests/roles-sync.test.ts tests/events-http.test.ts tests/event-outbox.test.ts tests/role-authority-http.test.ts tests/settings-cache.test.ts tests/org-proof.test.ts tests/access-state.test.ts tests/client-keys.test.ts",
-    "test:events:db": "node tests/run-role-events-db.mjs"
+    "test:jwks": "node --import tsx --test tests/public-jwks.test.ts",
+    "test:events:db": "node tests/run-role-events-db.mjs",
+    "test:keys": "node --import tsx --test tests/account-key-state.test.ts tests/account-client-key-http.test.ts tests/signing-key-cache.test.ts",
+    "test:keys:linux": "tsc -p account/server/tsconfig.json && node --test tests/account-key-linux.mjs && npm run test:keys:linux:source",
+    "test:keys:linux:source": "ACCOUNT_KEY_SOURCE=1 node --import tsx --test tests/account-key-linux.mjs"
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",

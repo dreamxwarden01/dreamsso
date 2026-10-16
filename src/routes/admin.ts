@@ -11,7 +11,8 @@ import { createTxn } from '../oidc/transactions.js';
 import { hasPerm } from '../rbac/index.js';
 import { countAuthenticators } from '../mfa.js';
 import { countPasskeys } from '../webauthn.js';
-import { getJwks, rotateSigningKey, getSigningKey } from '../keys.js';
+import { getJwks, rotateSigningKey, getSigningKey, getSigningKeyStatus } from '../keys.js';
+import {readClientKeyStatus} from '../clientKeyStatus.js';
 import { verifyJwksUri } from '../clientKeys.js';
 import { SignJWT } from 'jose';
 import { s2sFetch } from '../s2sFetch.js';
@@ -494,8 +495,10 @@ adminRouter.delete('/admin/api/clients/:id', requireCsrf, async (req: AdminReque
 
 // --- signing keys ---
 adminRouter.get('/admin/api/keys', async (_req: AdminRequest, res: Response) => {
+  const rotation=await getSigningKeyStatus();
   const { rows } = await pool.query(
-    `SELECT kid, alg, status, created_at, activated_at, retired_at FROM signing_keys ORDER BY created_at DESC`,
+    `SELECT kid, alg, status, created_at, activated_at, retired_at, published_at, activate_after
+      FROM signing_keys ORDER BY created_at DESC`,
   );
   // in_jwks lets the UI distinguish "retired, still verifying" from "retired,
   // out of the published set" without re-deriving the 24h window client-side.
@@ -508,16 +511,15 @@ adminRouter.get('/admin/api/keys', async (_req: AdminRequest, res: Response) => 
     keys: rows
       .map((k) => ({ ...k, in_jwks: published.has(k.kid) }))
       .filter((k) => k.status !== 'retired' || k.in_jwks),
-    jwks,
+    jwks,rotation,
   });
 });
 
-// Rotate: new key signs immediately; the old one keeps verifying from the JWKS
-// for 24h. Both first-party RPs re-fetch the JWKS on an unknown kid, so there
-// is no propagation delay to wait out.
+// Publication precedes activation. Repeated requests while pending keep the
+// existing operation; resolve an uncertain response through GET status first.
 adminRouter.post('/admin/api/keys/rotate', requireCsrf, async (_req: AdminRequest, res: Response) => {
-  const kid = await rotateSigningKey();
-  res.json({ kid });
+  const status=await rotateSigningKey();
+  res.status(status.state==='pending'?202:200).json(status);
 });
 
 // Rotate the ACCOUNT PORTAL's client key. The key is RP-owned (the BFF signs
@@ -539,7 +541,7 @@ adminRouter.post('/admin/api/account-portal/rotate-client-key', requireCsrf, asy
   let r: globalThis.Response;
   try {
     r = await s2sFetch(portal + '/internal/rotate-client-key', {
-      method: 'POST',
+      method: 'POST',redirect:'error',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ token }),
       signal: AbortSignal.timeout(5000),
@@ -547,8 +549,23 @@ adminRouter.post('/admin/api/account-portal/rotate-client-key', requireCsrf, asy
   } catch {
     return res.status(502).json({ error: 'portal_unreachable' });
   }
-  if (!r.ok) return res.status(502).json({ error: 'rotate_failed' });
-  res.json(await r.json());
+  if (!r.ok) { await r.body?.cancel().catch(()=>{});return res.status(502).json({ error: 'rotate_failed' }); }
+  try { return res.status(r.status===202?202:200).json(await readClientKeyStatus(r)); }
+  catch { return res.status(502).json({error:'portal_status_unavailable'}); }
+});
+
+adminRouter.get('/admin/api/account-portal/client-key',async(_req:AdminRequest,res:Response)=>{
+  const portal=((await getSetting('account_portal_url',config.accountPortalUrl))!).replace(/\/+$/,'');
+  const {kid,privateKey}=await getSigningKey(),now=Math.floor(Date.now()/1000);
+  const token=await new SignJWT({method:'GET',path:'/internal/rotate-client-key'})
+    .setProtectedHeader({alg:'EdDSA',kid,typ:'client-key-status+jwt'}).setIssuer(config.issuer)
+    .setAudience(config.accountClientId).setIssuedAt(now).setExpirationTime(now+60).setJti(crypto.randomUUID()).sign(privateKey);
+  try{
+    const result=await s2sFetch(portal+'/internal/rotate-client-key',{
+      method:'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Accept:'application/json'},signal:AbortSignal.timeout(5000)});
+    if(!result.ok){await result.body?.cancel().catch(()=>{});return res.status(502).json({error:'portal_status_unavailable'});}
+    return res.json(await readClientKeyStatus(result));
+  }catch{return res.status(502).json({error:'portal_status_unavailable'});}
 });
 
 // --- service-to-service mTLS (client certificate presented at the CF edge) ---

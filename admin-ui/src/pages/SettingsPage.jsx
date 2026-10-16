@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { getSettings, updateSettings, sendTestEmail, generateGateKey, rotatePortalClientKey } from '../api.js';
+import { getSettings, updateSettings, sendTestEmail, generateGateKey, rotatePortalClientKey, getPortalClientKey } from '../api.js';
 import { normalizeHostname } from '../../../src/clientNormalize.ts';
 import MtlsCard from '../MtlsCard.jsx';
 
@@ -311,17 +311,45 @@ export default function SettingsPage() {
   };
 
   // Portal client key: relayed to the portal's BFF (the key is RP-owned).
-  const [acctKey, setAcctKey] = useState(null); // {kid, rotated_at} after a rotate this session
+  const [acctKey, setAcctKey] = useState(null);
   const [acctKeyBusy, setAcctKeyBusy] = useState(false);
   const [acctKeyErr, setAcctKeyErr] = useState(null);
+  const [acctKeyChecked, setAcctKeyChecked] = useState(false);
+  const unresolvedAcctKey = useRef(null);
+  const acctKeyReadGeneration = useRef(0);
+  const readAcctKey = async () => {
+    const generation=++acctKeyReadGeneration.current;
+    try {
+      const status=await getPortalClientKey();if(generation!==acctKeyReadGeneration.current)return null;
+      setAcctKey(status);setAcctKeyChecked(true);
+      const unresolved=unresolvedAcctKey.current;
+      setAcctKeyErr(unresolved && !status.rotation && status.kid===unresolved.previousKid
+        ? `No rotation was scheduled. Check the portal before retrying. [${unresolved.code}]` : null);
+      unresolvedAcctKey.current=null;return status;
+    }
+    catch (e) { if(generation!==acctKeyReadGeneration.current)return null;setAcctKeyChecked(false);if(e.message!=='unauthenticated')setAcctKeyErr('Client-key status is unavailable. Refresh before scheduling a rotation.');return null; }
+  };
+  useEffect(() => { void readAcctKey(); }, []);
+  useEffect(() => {
+    if (!acctKey?.rotation && acctKeyChecked) return;
+    const timer=setInterval(()=>{if(document.visibilityState==='visible')void readAcctKey();},15000);
+    return()=>clearInterval(timer);
+  }, [acctKey?.rotation?.id, acctKeyChecked]);
   const runRotateAcctKey = async () => {
     setAcctKeyBusy(true);
     setAcctKeyErr(null);
+    const previousKid=acctKey?.kid;
+    unresolvedAcctKey.current=null;
+    acctKeyReadGeneration.current++;
     try {
-      setAcctKey(await rotatePortalClientKey());
+      const status=await rotatePortalClientKey();acctKeyReadGeneration.current++;setAcctKey(status);
     } catch (e) {
+      acctKeyReadGeneration.current++;
       if (e.message === 'unauthenticated') return;
-      setAcctKeyErr(`Couldn't rotate. [${e.data?.error || 'http_' + e.status}]`);
+      unresolvedAcctKey.current={previousKid,code:e.data?.error || 'http_' + e.status};
+      setAcctKeyChecked(false);
+      setAcctKeyErr(`Couldn't confirm the schedule. Checking status before another attempt. [${e.data?.error || 'http_' + e.status}]`);
+      await readAcctKey();
     } finally {
       setAcctKeyBusy(false);
     }
@@ -639,15 +667,18 @@ export default function SettingsPage() {
             note={acctKey ? `current kid ${acctKey.kid}` : 'the key the portal signs its client assertions with'}
           >
             <div className="inline-row">
-              <button className="btn" onClick={runRotateAcctKey} disabled={acctKeyBusy}>
-                {acctKeyBusy ? 'Rotating…' : 'Rotate client key'}
+              <button className="btn" onClick={runRotateAcctKey} disabled={acctKeyBusy || !acctKeyChecked || !!acctKey?.rotation}>
+                {acctKeyBusy ? 'Scheduling…' : acctKey?.rotation ? 'Rotation scheduled' : 'Rotate client key'}
               </button>
+              {!acctKeyChecked && <button className="btn" onClick={()=>void readAcctKey()}>Refresh status</button>}
             </div>
           </Field>
           <span className="hint">
-            One-click safe: the portal generates a fresh key, keeps the old one published for overlap,
-            and the SSO picks the new one up from its JWKS automatically.
+            The new public key is published first and can start signing after at least five minutes.
+            Previously used keys remain available to verify existing tokens for 24 hours after activation.
           </span>
+          {acctKey?.rotation && <p className="hint">{acctKey.rotation.activate_after
+            ? `Starts no earlier than ${new Date(acctKey.rotation.activate_after).toLocaleString()}` : 'Publishing the new key…'}</p>}
           {acctKeyErr && <p className="err">{acctKeyErr}</p>}
         </div>
       </div>
@@ -707,7 +738,7 @@ export default function SettingsPage() {
                 <input
                   className={'input mono' + (errs.mail_from ? ' bad' : '')}
                   value={f.mail_from}
-                  placeholder="no-reply@dreamxwarden.ca"
+                  placeholder="no-reply@example.com"
                   onChange={(e) => { set({ mail_from: e.target.value }); setErr('mail_from', null); }}
                   onBlur={blur.mail_from}
                 />

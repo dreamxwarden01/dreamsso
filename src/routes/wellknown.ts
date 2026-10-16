@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { config } from '../config.js';
-import { getJwks } from '../keys.js';
 
 export const wellKnownRouter = Router();
 
@@ -22,9 +21,4 @@ wellKnownRouter.get('/.well-known/openid-configuration', (_req, res) => {
     subject_types_supported: ['public'],
     scopes_supported: ['openid', 'profile', 'email'],
   });
-});
-
-wellKnownRouter.get('/jwks', async (_req, res) => {
-  res.setHeader('Cache-Control', 'public, max-age=300');
-  res.json(await getJwks());
 });

@@ -107,8 +107,22 @@ CREATE TABLE signing_keys (                       -- JWKS for SSO-issued tokens
                       CHECK (status IN ('current','next','retired')),
     created_at      timestamptz NOT NULL DEFAULT now(),
     activated_at    timestamptz,
-    retired_at      timestamptz
+    retired_at      timestamptz,
+    rotation_id     uuid,
+    published_at    timestamptz,
+    activate_after  timestamptz,
+    CONSTRAINT signing_keys_publication_window CHECK (
+      (published_at IS NULL AND activate_after IS NULL)
+      OR (published_at IS NOT NULL AND activate_after IS NOT NULL
+          AND activate_after >= published_at + interval '300 seconds')
+    ),
+    CONSTRAINT signing_keys_pending_identity CHECK (
+      status <> 'next' OR (rotation_id IS NOT NULL AND activated_at IS NULL AND retired_at IS NULL)
+    )
 );
+CREATE UNIQUE INDEX signing_keys_one_current ON signing_keys ((1)) WHERE status='current';
+CREATE UNIQUE INDEX signing_keys_one_next ON signing_keys ((1)) WHERE status='next';
+CREATE UNIQUE INDEX signing_keys_rotation_id ON signing_keys(rotation_id) WHERE rotation_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Devices & sessions

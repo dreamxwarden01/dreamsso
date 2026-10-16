@@ -23,7 +23,7 @@ try {
   const { stdout } = await docker('port', name, '5432/tcp'), match = /^127\.0\.0\.1:(\d+)\s*$/.exec(stdout);
   if (!match) throw new Error('Unexpected test database network binding.');
   const env = { ...process.env, DREAMSSO_ROLE_SYNC_TEST_DATABASE_URL: `postgresql://dreamsso_role_sync_test:${password}@127.0.0.1:${match[1]}/dreamsso_role_sync_test` };
-  const result = await exec(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1', 'tests/roles-sync.database.test.ts', 'tests/event-outbox.database.test.ts', 'tests/role-administration.database.test.ts', 'tests/role-authority.database.test.ts', 'tests/role-migration.database.test.ts', 'tests/org-proof.database.test.ts', 'tests/registration-role-lock.database.test.ts'], { env, maxBuffer:8*1024*1024 });
+  const result = await exec(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1', 'tests/roles-sync.database.test.ts', 'tests/event-outbox.database.test.ts', 'tests/role-administration.database.test.ts', 'tests/role-authority.database.test.ts', 'tests/role-migration.database.test.ts', 'tests/org-proof.database.test.ts', 'tests/registration-role-lock.database.test.ts', 'tests/signing-key-rotation.database.test.ts'], { env, maxBuffer:8*1024*1024 });
   process.stdout.write(result.stdout);process.stderr.write(result.stderr);
 } catch (error) {
   // The subprocess environment contains an ephemeral password; do not dump the error object.

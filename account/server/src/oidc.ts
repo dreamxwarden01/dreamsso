@@ -2,51 +2,27 @@
 // videosite's lib/oidc.js. Same DreamSSO OP, same private_key_jwt (RFC 7523,
 // EdDSA) client auth; here jose is a normal import (the BFF is ESM).
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import {
   SignJWT,
   jwtVerify,
   importJWK,
   createRemoteJWKSet,
-  calculateJwkThumbprint,
   type JWTPayload,
-  type JWK,
 } from 'jose';
 import { config } from './config.js';
 import { s2sFetch } from './s2sFetch.js';
+import {selectClientSigningKey,getClientKeyStatus,getClientPublicJwks,scheduleClientKeyRotation} from './client-key-state.js';
 
-// Cached client signing key (private_key_jwt) + remote JWKS resolver.
-// Key file: legacy single private JWK, or {keys:[current, previous], rotated_at}
-// after a rotation. keys[0] signs; the jwks.json route publishes every key.
-type KeyFile = { keys: (JWK & { kid?: string })[]; rotated_at?: string };
-export function readKeyFile(): KeyFile {
-  const raw = JSON.parse(fs.readFileSync(config.clientKeyFile, 'utf8')) as Record<string, unknown>;
-  return Array.isArray(raw.keys)
-    ? { keys: raw.keys as KeyFile['keys'], rotated_at: raw.rotated_at as string | undefined }
-    : { keys: [raw as unknown as JWK & { kid?: string }] };
-}
-let _privJwk: JWK & { kid?: string };
-let _clientKey: Awaited<ReturnType<typeof importJWK>> | undefined;
+// Each selection reads the durable current identity; only its imported key caches.
+let cachedSigner:{kid:string;key:Awaited<ReturnType<typeof importJWK>>}|undefined;
 async function clientKey() {
-  if (_clientKey) return _clientKey;
-  _privJwk = readKeyFile().keys[0];
-  _clientKey = await importJWK(_privJwk, 'EdDSA');
-  return _clientKey;
+  const selected=await selectClientSigningKey(config.clientKeyFile);
+  if(cachedSigner?.kid===selected.kid)return cachedSigner;
+  const result={kid:selected.kid,key:await importJWK(selected.jwk,'EdDSA')};cachedSigner=result;return result;
 }
-
-// Rotate the client signing key: fresh Ed25519 becomes keys[0], the replaced
-// key stays published until the NEXT rotation (overlap for in-flight
-// assertions + the SSO's remote-JWKS re-fetch on the unknown kid).
-export async function rotateClientKey(): Promise<{ kid: string; rotated_at: string }> {
-  const jwk = crypto.generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as JWK & { kid?: string; alg?: string };
-  jwk.kid = await calculateJwkThumbprint(jwk); // RFC 7638 (public members only)
-  jwk.alg = 'EdDSA';
-  const file: KeyFile = { keys: [jwk, readKeyFile().keys[0]], rotated_at: new Date().toISOString() };
-  fs.writeFileSync(config.clientKeyFile, JSON.stringify(file, null, 2) + '\n');
-  _privJwk = jwk;
-  _clientKey = await importJWK(jwk, 'EdDSA');
-  return { kid: jwk.kid, rotated_at: file.rotated_at! };
-}
+export const rotateClientKey=()=>scheduleClientKeyRotation(config.clientKeyFile);
+export const clientKeyStatus=()=>getClientKeyStatus(config.clientKeyFile);
+export const publicClientJwks=()=>getClientPublicJwks(config.clientKeyFile);
 
 let _jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 function jwks() {
@@ -96,10 +72,10 @@ export function authorizeUrl(p: {
 // verifies it against this client's registered key and pins iss/sub to the
 // account portal's client_id.
 export async function s2sAssertion(): Promise<string> {
-  const key = await clientKey();
+  const {kid,key} = await clientKey();
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({})
-    .setProtectedHeader({ alg: 'EdDSA', kid: _privJwk.kid })
+    .setProtectedHeader({ alg: 'EdDSA', kid })
     .setIssuer(config.clientId)
     .setSubject(config.clientId)
     .setAudience(config.issuer)
@@ -119,10 +95,10 @@ export interface TokenResponse {
 
 // Authorization-code -> tokens, authenticating with private_key_jwt.
 export async function exchangeCode(code: string, verifier: string): Promise<TokenResponse> {
-  const key = await clientKey(); // also populates _privJwk (for the kid)
+  const {kid,key} = await clientKey(); // selected key and kid stay paired through concurrent activation
   const now = Math.floor(Date.now() / 1000);
   const assertion = await new SignJWT({})
-    .setProtectedHeader({ alg: 'EdDSA', kid: _privJwk.kid })
+    .setProtectedHeader({ alg: 'EdDSA', kid })
     .setIssuer(config.clientId)
     .setSubject(config.clientId)
     .setAudience(config.issuer)

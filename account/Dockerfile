@@ -27,6 +27,7 @@ RUN npm ci --omit=dev
 
 # ---- runtime ----
 FROM node:22-bookworm-slim AS runtime
+RUN test -x /usr/bin/flock && /usr/bin/flock --version
 WORKDIR /app/server
 ENV NODE_ENV=production \
     PORT=4001 \
@@ -37,7 +38,7 @@ COPY --from=deps   /server/node_modules ./node_modules
 COPY --from=server /server/dist         ./dist
 COPY --from=client /client/dist         /app/client/dist
 COPY server/package.json ./
-RUN mkdir -p /config && chown -R node:node /config /app
+RUN mkdir -p /config && chmod 0700 /config && chown -R node:node /config /app
 USER node
 VOLUME ["/config"]
 EXPOSE 4001

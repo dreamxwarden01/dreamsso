@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { getSetting, hasSetting } from './settings.js';
 import { securityHeaders } from './security.js';
 import { wellKnownRouter } from './routes/wellknown.js';
+import {createJwksRouter} from './routes/jwks.js';
 import { authorizeRouter } from './routes/authorize.js';
 import { tokenRouter } from './routes/token.js';
 import { clientKeySet } from './clientKeys.js';
@@ -31,7 +32,7 @@ import { startEventPump } from './events.js';
 import { sweepInvitations } from './registration.js';
 import { pool } from './db.js';
 import { redis } from './redis.js';
-import { getSigningKey } from './keys.js';
+import { getSigningKey,getJwks } from './keys.js';
 import { cleanExpiredSessions } from './oidc/sessions.js';
 import { runMigrations } from './db/migrations.js';
 import crypto from 'node:crypto';
@@ -56,6 +57,7 @@ app.use(securityHeaders);
 app.use(cookieParser());
 // The setup gate still protects the event channel before any body is parsed.
 app.use(setupGate);
+app.use(createJwksRouter(()=>getJwks()));
 app.use(EVENT_PATH, eventForm);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json()); // resource APIs (e.g. /account/*) take JSON bodies

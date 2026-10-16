@@ -1,11 +1,13 @@
 import crypto from 'node:crypto';
 import type pg from 'pg';
 import {
-  generateKeyPair, exportJWK, exportPKCS8, importPKCS8, calculateJwkThumbprint,
+  generateKeyPair, exportJWK, exportPKCS8, importPKCS8, importJWK, calculateJwkThumbprint,
+  SignJWT,jwtVerify,
   type JWK, type JSONWebKeySet,
 } from 'jose';
 import { pool } from './db.js';
 import { config } from './config.js';
+import {SigningKeyRotation,SigningKeyStateError,type SigningKeyStatus} from './signingKeyRotation.js';
 
 const ALG = 'EdDSA';
 
@@ -26,34 +28,37 @@ function decrypt(buf: Buffer): string {
 
 let cached: { kid: string; privateKey: CryptoKey; publicJwk: Record<string, unknown> } | null = null;
 
-// Load the current signing key, generating + persisting one on first boot.
+async function generateMaterial() {
+  const {publicKey,privateKey}=await generateKeyPair(ALG,{crv:'Ed25519',extractable:true});
+  const publicJwk=(await exportJWK(publicKey)) as unknown as Record<string,unknown>;
+  const kid=await calculateJwkThumbprint(publicJwk as unknown as JWK);
+  Object.assign(publicJwk,{kid,alg:ALG,use:'sig'});
+  const proof=await new SignJWT({purpose:'signing-key-self-test'}).setProtectedHeader({alg:ALG,kid}).sign(privateKey);
+  await jwtVerify(proof,publicKey,{algorithms:[ALG]});
+  publicSigningJwk(publicJwk);
+  return{kid,alg:ALG,publicJwk,privateKeyEnc:encrypt(await exportPKCS8(privateKey))};
+}
+function publicSigningJwk(value:Record<string,unknown>):JWK {
+  if(value.kty!=='OKP'||value.crv!=='Ed25519'||typeof value.x!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(value.x)
+    ||typeof value.kid!=='string'||!/^[A-Za-z0-9_-]{1,200}$/.test(value.kid)||(value.alg!==undefined&&value.alg!=='EdDSA')
+    ||['d','p','q','dp','dq','qi','k'].some(name=>name in value))throw new SigningKeyStateError();
+  return{kty:'OKP',crv:'Ed25519',x:value.x,kid:value.kid,alg:'EdDSA',use:'sig'};
+}
+const rotation=new SigningKeyRotation(pool,generateMaterial,()=>invalidateJwksCache());
+
+// The database selects the current signer on every call. An imported key may
+// cache by kid, but another process's activation cannot leave this pointer stale.
 export async function getSigningKey() {
-  if (cached) return cached;
-
-  const existing = await pool.query(
-    "SELECT kid, public_jwk, private_key_enc FROM signing_keys WHERE status = 'current' ORDER BY created_at DESC LIMIT 1",
-  );
-  if (existing.rows[0]) {
-    const row = existing.rows[0];
-    const privateKey = (await importPKCS8(decrypt(row.private_key_enc), ALG)) as CryptoKey;
-    cached = { kid: row.kid, privateKey, publicJwk: row.public_jwk };
-    return cached;
-  }
-
-  const { publicKey, privateKey } = await generateKeyPair(ALG, { crv: 'Ed25519', extractable: true });
-  const publicJwk = (await exportJWK(publicKey)) as unknown as Record<string, unknown>;
-  const kid = await calculateJwkThumbprint(publicJwk as any);
-  publicJwk.kid = kid;
-  publicJwk.alg = ALG;
-  publicJwk.use = 'sig';
-
-  await pool.query(
-    `INSERT INTO signing_keys (kid, alg, public_jwk, private_key_enc, status, activated_at)
-     VALUES ($1, $2, $3, $4, 'current', now())`,
-    [kid, ALG, publicJwk, encrypt(await exportPKCS8(privateKey))],
-  );
-  cached = { kid, privateKey: privateKey as CryptoKey, publicJwk };
-  return cached;
+  const row=await rotation.current();
+  if(cached?.kid===row.kid)return cached;
+  try{
+    const publicJwk=publicSigningJwk(row.public_jwk);
+    if(row.alg!==ALG||publicJwk.kid!==row.kid)throw new SigningKeyStateError();
+    const privateKey=(await importPKCS8(decrypt(row.private_key_enc),ALG)) as CryptoKey;
+    const proof=await new SignJWT({purpose:'signer-pair-check'}).setProtectedHeader({alg:ALG,kid:row.kid}).sign(privateKey);
+    await jwtVerify(proof,await importJWK(publicJwk,ALG),{algorithms:[ALG]});
+    const selected={kid:row.kid,privateKey,publicJwk:row.public_jwk};cached=selected;return selected;
+  }catch{throw new SigningKeyStateError();}
 }
 
 // Public JWKS — current + next + still-trusted retired keys (for verification).
@@ -69,18 +74,25 @@ let jwksCache: { value: JSONWebKeySet; at: number } | null = null;
 const JWKS_CACHE_MS = 60_000;
 
 export async function getJwks(db?: pg.PoolClient): Promise<JSONWebKeySet> {
-  if (!db && jwksCache && Date.now() - jwksCache.at < JWKS_CACHE_MS) return jwksCache.value;
-  const { rows } = await (db ?? pool).query(
-    `SELECT public_jwk FROM signing_keys
+  if (!db && jwksCache && performance.now() - jwksCache.at < JWKS_CACHE_MS) return jwksCache.value;
+  const started=performance.now();
+  const text=`SELECT public_jwk FROM signing_keys
       WHERE status IN ('current','next')
          OR (status = 'retired' AND retired_at > now() - ${RETIRED_JWKS_WINDOW})
-      ORDER BY created_at DESC`,
-  );
-  const value = { keys: rows.map((r) => r.public_jwk as JWK) };
+      ORDER BY created_at DESC`;
+  // pg supports per-query query_timeout; @types/pg exposes it only on the
+  // connection options, so retain the typed extension at this call boundary.
+  const bounded:pg.QueryConfig&{query_timeout:number}={text,query_timeout:5000};
+  const {rows}=db?await db.query(text):await pool.query(bounded);
+  // A stalled read/resumed process must not cache a snapshot from before
+  // publication as though it were fresh now. Transactional callers stay uncached.
+  if(!db&&performance.now()-started>5000)throw new SigningKeyStateError();
+  if(!rows.length)throw new SigningKeyStateError();
+  const value = { keys: rows.map((r) => publicSigningJwk(r.public_jwk)) };
   // Transactional proof checks must neither acquire another pool connection
   // nor share uncommitted/public-key snapshots through the process cache.
   if (db) return value;
-  jwksCache = { value, at: Date.now() };
+  jwksCache = { value, at: started };
   return jwksCache.value;
 }
 
@@ -88,40 +100,7 @@ export function invalidateJwksCache(): void {
   jwksCache = null;
 }
 
-// Rotate the signing key: mint a fresh Ed25519 pair, retire the current key,
-// and activate the new one in a single transaction. The retired key keeps
-// verifying (it stays in the JWKS for RETIRED_JWKS_WINDOW); both RPs use jose's
-// createRemoteJWKSet, which re-fetches on an unknown kid, so signing with the
-// new key immediately is safe. Returns the new kid.
-export async function rotateSigningKey(): Promise<string> {
-  const { publicKey, privateKey } = await generateKeyPair(ALG, { crv: 'Ed25519', extractable: true });
-  const publicJwk = (await exportJWK(publicKey)) as unknown as Record<string, unknown>;
-  const kid = await calculateJwkThumbprint(publicJwk as any);
-  publicJwk.kid = kid;
-  publicJwk.alg = ALG;
-  publicJwk.use = 'sig';
-  const privatePem = await exportPKCS8(privateKey);
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      "UPDATE signing_keys SET status = 'retired', retired_at = now() WHERE status = 'current'",
-    );
-    await client.query(
-      `INSERT INTO signing_keys (kid, alg, public_jwk, private_key_enc, status, activated_at)
-       VALUES ($1, $2, $3, $4, 'current', now())`,
-      [kid, ALG, publicJwk, encrypt(privatePem)],
-    );
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-
-  cached = null; // next mint loads the new current key
-  jwksCache = null;
-  return kid;
-}
+// Schedule publication first. A later status/signing read activates the exact
+// pending key after the persisted five-minute propagation window.
+export async function rotateSigningKey():Promise<SigningKeyStatus>{return rotation.schedule();}
+export async function getSigningKeyStatus():Promise<SigningKeyStatus>{return rotation.status();}

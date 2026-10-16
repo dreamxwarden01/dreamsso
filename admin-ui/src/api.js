@@ -61,3 +61,4 @@ export const updateSettings = (body) => req('/settings', { method: 'PUT', body: 
 export const sendTestEmail = (to) => req('/settings/test-email', { method: 'POST', body: JSON.stringify({ to }) });
 export const generateGateKey = () => req('/settings/generate-gate-key', { method: 'POST' });
 export const rotatePortalClientKey = () => req('/account-portal/rotate-client-key', { method: 'POST' });
+export const getPortalClientKey = () => req('/account-portal/client-key');
