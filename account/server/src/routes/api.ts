@@ -461,7 +461,7 @@ apiRouter.get('/api/stepup/status', requireSession, async (req: AuthedRequest, r
   const m = String(req.query.mode ?? '');
   const mode = m === 'fallback' || m === 'email-change' ? m : 'strong-mandatory';
   try {
-    const r = await fetch(
+    const r = await s2sFetch(
       config.internal + '/account/stepup/status?sid=' + encodeURIComponent(s.ssoSid) + '&mode=' + mode,
       { headers: { authorization: 'Bearer ' + s.accessToken } },
     );
