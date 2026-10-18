@@ -239,3 +239,18 @@ test('legacy parser rejects malformed timestamps, attempts and undeliverable non
   assert.throws(() => parseLegacyEvent(legacy(), 'NaN'), /legacy_member_invalid/);
   assert.throws(() => parseLegacyEvent(JSON.stringify({ ...JSON.parse(legacy()), payload: { text: 'x'.repeat(EVENT_BYTES_MAX) } }), '4000'), /legacy_event_too_large/);
 });
+
+test('shutdown settles the already-owned event but never claims or sends the next pending event',async()=>{
+ const store=new FakeStore(),queue=[row(),row(ID2)];let stopping=false,claims=0,sends=0;
+ store.claim=async()=>{claims++;return{...store.current,events:[queue[0]]};};
+ store.settle=async(_claim,ids,outcome)=>{store.settled.push({ids,outcome});queue.shift();return true;};
+ await drainDestination({store,stopping:()=>stopping,sign:async()=> 'signed',send:async()=>{sends++;stopping=true;return 204;}},'rp');
+ assert.equal(claims,1);assert.equal(sends,1);assert.deepEqual(store.settled,[{ids:[ID],outcome:{kind:'delivered'}}]);assert.deepEqual(queue.map(row=>row.id),[ID2]);
+ await drainDestination({store,stopping:()=>true,sign:async()=>{throw Error('must not sign');},send:async()=>{throw Error('must not send');}},'rp');assert.equal(claims,1);
+});
+
+test('shutdown finishes a committed legacy import removal but leaves remaining Redis members intact',async()=>{
+ const fixture=redisFixture(),second=JSON.stringify({...JSON.parse(legacy()),id:ID2});fixture.members.set(second,'4001');let stopping=false;
+ const run=createLegacyImporter({redis:fixture.redis,stopping:()=>stopping,persist:async()=>{fixture.timeline.push('commit');stopping=true;},report:()=>{throw Error('unexpected import failure');}});
+ await run();assert.deepEqual(fixture.timeline,['commit','remove']);assert.equal(fixture.members.size,1);assert.ok(fixture.members.has(second));
+});

@@ -1,3 +1,5 @@
+import {ServiceLifecycle,installShutdownSignals,safeLifecycleError} from './lifecycle.js';
+import {closeS2SFetch,destroyS2SFetch} from './s2sFetch.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { config } from './config.js';
@@ -28,7 +30,7 @@ import { orgRouter } from './routes/org.js';
 import { setupGate, setupRouter } from './routes/setup.js';
 import { resolveSetupState, isSetupComplete } from './setup/state.js';
 import { ensureSetupToken, SETUP_TOKEN_FILE } from './setup/token.js';
-import { startEventPump } from './events.js';
+import { startEventPump,stopEventPump,settleEventPump } from './events.js';
 import { sweepInvitations } from './registration.js';
 import { pool } from './db.js';
 import { redis } from './redis.js';
@@ -38,7 +40,16 @@ import { runMigrations } from './db/migrations.js';
 import crypto from 'node:crypto';
 import { render404Page } from './views.js';
 
+const lifecycle=new ServiceLifecycle({
+ quiesce:stopEventPump,
+ drain:settleEventPump,
+ close:async()=>{const results=await Promise.allSettled([closeS2SFetch(),pool.end(),redis.quit()]);if(results.some(result=>result.status==='rejected'))throw Error('Client cleanup failed.');},
+ force:()=>{redis.disconnect();destroyS2SFetch();},
+ exit:code=>process.exit(code),report:code=>console.warn('DreamSSO lifecycle: '+code),
+});
+installShutdownSignals(lifecycle);
 const app = express();
+app.use((_req,res,next)=>{if(lifecycle.stopping){res.set({'Connection':'close','Cache-Control':'no-store'}).status(503).json({error:'service_stopping'});return;}next();});
 app.set('trust proxy', 1); // behind Caddy (dev) / OpenResty (prod)
 app.disable('x-powered-by');
 // API responses must never be cached or 304-revalidated: no auto-ETag on
@@ -143,15 +154,16 @@ app.use(async (req, res) => {
 
 async function main() {
   await resolveSetupState();
+  if(lifecycle.stopping)return;
 
   // First-run: boot in setup mode (no DB writes, no pumps) and serve only /setup.
   if (!isSetupComplete()) {
     const token = ensureSetupToken();
-    app.listen(config.port, () => {
+    lifecycle.listen(()=>app.listen(config.port, () => {
       console.log(`DreamSSO — FIRST-RUN SETUP on :${config.port}`);
       console.log(`  open:  /setup?token=${token}`);
       console.log(`  token: ${SETUP_TOKEN_FILE}`);
-    });
+    }));
     return;
   }
 
@@ -159,21 +171,21 @@ async function main() {
   // configured boot after migration failure instead of serving broken routes.
   // The unconfigured installer branch above still starts without a database.
   await runMigrations({ strict: true });
+  if(lifecycle.stopping)return;
 
   const { kid } = await getSigningKey();
+  if(lifecycle.stopping)return;
   // DB backstop: prune sessions past the idle/absolute windows (hourly + at boot).
-  cleanExpiredSessions();
-  setInterval(cleanExpiredSessions, 60 * 60 * 1000).unref();
+  lifecycle.every(cleanExpiredSessions, 60 * 60 * 1000);
   // Expired unused invitation codes die by the hour; consumed rows are forever.
-  sweepInvitations();
-  setInterval(sweepInvitations, 60 * 60 * 1000).unref();
+  lifecycle.every(sweepInvitations, 60 * 60 * 1000);
   startEventPump(); // boot drain + 60s retry sweep + archive pruning
-  app.listen(config.port, () => {
+  lifecycle.listen(()=>app.listen(config.port, () => {
     console.log(`DreamSSO listening on :${config.port} — issuer ${config.issuer} — signing kid ${kid}`);
-  });
+  }));
 }
 
-main().catch((err) => {
-  console.error('Fatal boot error:', err);
-  process.exit(1);
+lifecycle.boot(main).catch(error=>{
+ console.error('DreamSSO startup failed: '+safeLifecycleError(error));
+ void lifecycle.stop(1);
 });

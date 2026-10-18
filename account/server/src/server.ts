@@ -1,3 +1,6 @@
+import {ServiceLifecycle,installShutdownSignals,safeLifecycleError} from './lifecycle.js';
+import {closeS2SFetch,destroyS2SFetch} from './s2sFetch.js';
+import {stopClientKeyWorkers,killClientKeyWorkers} from './client-key-state.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import fs from 'node:fs';
@@ -17,7 +20,15 @@ import { setupGate, setupRouter } from './routes/setup.js';
 import { resolveSetupState, isSetupComplete } from './setup/state.js';
 import { ensureSetupToken, clearSetupToken, SETUP_TOKEN_FILE } from './setup/token.js';
 
+const lifecycle=new ServiceLifecycle({
+ quiesce:()=>{},drain:stopClientKeyWorkers,
+ close:async()=>{const results=await Promise.allSettled([closeS2SFetch(),redis.quit()]);if(results.some(result=>result.status==='rejected'))throw Error('Client cleanup failed.');},
+ force:()=>{killClientKeyWorkers();redis.disconnect();destroyS2SFetch();},
+ exit:code=>process.exit(code),report:code=>console.warn('Account lifecycle: '+code),
+});
+installShutdownSignals(lifecycle);
 const app = express();
+app.use((_req,res,next)=>{if(lifecycle.stopping){res.set({'Connection':'close','Cache-Control':'no-store'}).status(503).json({error:'service_stopping'});return;}next();});
 app.set('trust proxy', 1); // behind Caddy (dev) / OpenResty (prod)
 app.disable('x-powered-by');
 // API responses must never be cached or 304-revalidated: no auto-ETag on
@@ -156,11 +167,11 @@ function main(): void {
   // the latch in-process (no restart).
   if (!isSetupComplete()) {
     const token = ensureSetupToken();
-    app.listen(config.port, () => {
+    lifecycle.listen(()=>app.listen(config.port, () => {
       console.log(`account portal — FIRST-RUN SETUP on :${config.port}`);
       console.log(`  open:  /setup?token=${token}`);
       console.log(`  token: ${SETUP_TOKEN_FILE}`);
-    });
+    }));
     return;
   }
 
@@ -168,9 +179,12 @@ function main(): void {
   // was interrupted between the config step and finish (the portal is usable either
   // way — the latch derives from .env + the client key).
   clearSetupToken();
-  app.listen(config.port, () => {
+  lifecycle.listen(()=>app.listen(config.port, () => {
     console.log(`account BFF listening on :${config.port} — RP ${config.clientId} @ ${config.issuer}`);
-  });
+  }));
 }
 
-main();
+lifecycle.boot(main).catch(error=>{
+ console.error('Account startup failed: '+safeLifecycleError(error));
+ void lifecycle.stop(1);
+});

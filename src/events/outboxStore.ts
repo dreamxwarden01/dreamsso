@@ -183,6 +183,7 @@ export interface DeliveryDependencies {
   sign(clientId: string, events: readonly WireEvent[]): Promise<string>;
   send(uri: string, token: string): Promise<number>;
   random?: () => number;
+  stopping?: () => boolean;
   report?(code: string): void;
 }
 export function boundedBatch(rows: readonly PendingRow[]): WireEvent[] {
@@ -240,7 +241,7 @@ export const SUCCESS_CLAIMS_PER_PASS = 8;
 export async function drainDestination(deps: DeliveryDependencies, clientId: string): Promise<void> {
   // Recover isolated healthy heads immediately after an outage, without
   // putting them back in poison batches or monopolizing this worker forever.
-  for (let i = 0; i < SUCCESS_CLAIMS_PER_PASS; i++) {
+  for (let i = 0; i < SUCCESS_CLAIMS_PER_PASS && !deps.stopping?.(); i++) {
     if (!(await deliverDestination(deps, clientId))) break;
   }
 }
@@ -301,6 +302,7 @@ export function createLegacyImporter(deps: {
   redis: LegacyRedis;
   persist(clientId: string, event: LegacyEvent): Promise<void>;
   report(code: string, digest: string): void;
+  stopping?: () => boolean;
 }): () => Promise<void> {
   let keyCursor = '0';
   let setCursor = '0';
@@ -318,6 +320,7 @@ export function createLegacyImporter(deps: {
       setCursor = destinations[0];
       for (const id of destinations[1]) pendingKeys.add(`events:out:${id}`);
       for (const key of [...pendingKeys].slice(0, 16)) {
+        if(deps.stopping?.())break;
         pendingKeys.delete(key);
         const clientId = key.slice('events:out:'.length);
         const [cursor, members] = await deps.redis.zscan(key, memberCursors.get(key) ?? '0', 'COUNT', '100');
@@ -326,6 +329,7 @@ export function createLegacyImporter(deps: {
         // COUNT is a hint: consume the complete page, including compact sets
         // that return slightly more than 100, rather than dropping a tail.
         for (let i = 0; i < members.length; i += 2) {
+          if(deps.stopping?.())break;
           const member = members[i];
           try {
             const event = parseLegacyEvent(member, members[i + 1]);

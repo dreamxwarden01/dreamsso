@@ -113,3 +113,48 @@ test('descriptor exhaustion cannot crash the signing process or retain a failed 
     const result=await completed(child);assert.equal(result.code,0,errors);assert.equal(output,'recovered\n');
   }finally{f.close();}
 });
+
+test('shutdown joins the actual admitted key worker and seals further mutation admission',linux,async()=>{
+  const f=fixture();let holder,service;
+  try{
+    const lock=f.file+'.rotation.lock';fs.writeFileSync(lock,'',{mode:0o600});
+    holder=spawn('/usr/bin/flock',['--exclusive','--no-fork',lock,process.execPath,'-e',"process.stdout.write('LOCKED\\n');setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']});
+    const holderDone=completed(holder);await new Promise((resolve,reject)=>{holder.once('error',reject);holder.stdout.once('data',resolve);});
+    const script="import assert from 'node:assert/strict';const m=await import(process.argv[1]);const running=m.scheduleClientKeyRotation(process.argv[2]);running.catch(()=>{});let settled=false;const stop=m.stopClientKeyWorkers().then(()=>{settled=true;});setTimeout(()=>{if(settled)process.exit(2);process.stdout.write('WAITING\\n');},80);await stop;await running;await assert.rejects(m.scheduleClientKeyRotation(process.argv[2]));process.stdout.write('DRAINED\\n');";
+    service=spawn(process.execPath,[...loader,'--input-type=module','-e',script,moduleUrl,f.file],{stdio:['ignore','pipe','ignore']});
+    const serviceDone=completed(service);let output='';service.stdout.on('data',chunk=>{output+=chunk.toString();});
+    for(let i=0;i<200&&!output.includes('WAITING');i++){if(service.exitCode!==null)throw Error('Synthetic key service exited before waiting.');await new Promise(resolve=>setTimeout(resolve,10));}
+    assert.ok(output.includes('WAITING'));holder.kill('SIGTERM');await holderDone;holder=undefined;
+    assert.equal((await serviceDone).code,0);service=undefined;assert.ok(output.includes('DRAINED'));
+    const state=JSON.parse(fs.readFileSync(f.file,'utf8'));assert.equal(state.current.kid,f.kid);assert.equal(state.generation,'2');assert.ok(state.pending);
+  }finally{holder?.kill('SIGKILL');service?.kill('SIGKILL');f.close();}
+});
+
+test('oversize worker result rejects early but shutdown waits for actual child close',linux,async()=>{
+  const f=fixture();let child;
+  const script=String.raw`
+    import assert from 'node:assert/strict';import fs from 'node:fs';
+    import childProcess from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';
+    import {EventEmitter} from 'node:events';import {PassThrough} from 'node:stream';
+    const worker=new EventEmitter();worker.stdout=new PassThrough();worker.stderr=new PassThrough();
+    let kills=0;worker.kill=signal=>{assert.equal(signal,'SIGKILL');kills++;return true;};
+    // Exercise the real output limit without a timing-dependent real process.
+    // Delaying close explicitly models kill() returning before process reaping.
+    childProcess.spawn=()=>worker;syncBuiltinESMExports();
+    const m=await import(process.argv[1]),file=process.argv[2],before=fs.readFileSync(file);
+    const running=m.scheduleClientKeyRotation(file);const rejected=assert.rejects(running);
+    worker.stdout.write(Buffer.alloc(16385));await rejected;assert.equal(kills,1);
+    let joined=false;const stopping=m.stopClientKeyWorkers().then(()=>{joined=true;});
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(joined,false);
+    await assert.rejects(m.scheduleClientKeyRotation(file));
+    assert.deepEqual(fs.readFileSync(file),before);
+    worker.emit('close',null,'SIGKILL');await stopping;assert.equal(joined,true);
+    assert.equal(fs.readdirSync(process.argv[3]).filter(name=>name.endsWith('.tmp')).length,0);
+    process.stdout.write('joined-after-close\n');
+  `;
+  try{
+    child=spawn(process.execPath,[...loader,'--input-type=module','-e',script,moduleUrl,f.file,f.dir],{stdio:['ignore','pipe','pipe']});
+    let output='',errors='';child.stdout.on('data',chunk=>{output+=chunk;});child.stderr.on('data',chunk=>{errors+=chunk;});
+    const result=await completed(child);child=undefined;assert.equal(result.code,0,errors);assert.equal(output,'joined-after-close\n');
+  }finally{child?.kill('SIGKILL');f.close();}
+});

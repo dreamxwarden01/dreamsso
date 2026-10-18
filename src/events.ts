@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {ActiveTasks} from './lifecycle.js';
 import { SignJWT } from 'jose';
 import { pool } from './db.js';
 import { redis } from './redis.js';
@@ -31,26 +32,30 @@ const SWEEP_MS = 60_000;
 let debounce: NodeJS.Timeout | null = null;
 let draining = false;
 let started = false;
+let stopping = false;
+const activeTasks = new ActiveTasks();
+const timers = new Set<NodeJS.Timeout>();
 const report = (code: string): void => { console.warn(`event pump: ${code}`); };
 
 export function kickDrain(): void {
-  if (debounce) return;
+  if (stopping || debounce) return;
   debounce = setTimeout(() => {
     debounce = null;
-    drainAll().catch(() => report('drain_failed'));
+    if (!stopping) void activeTasks.track(drainAll()).catch(() => report('drain_failed'));
   }, DEBOUNCE_MS);
   debounce.unref?.();
 }
 
 export async function drainAll(): Promise<void> {
-  if (draining) return;
+  if (stopping || draining) return;
   draining = true;
   try {
     const store = new PostgresOutboxStore(pool);
     const destinations = await store.destinations(32);
-    for (let i = 0; i < destinations.length; i += 4) {
+    for (let i = 0; i < destinations.length && !stopping; i += 4) {
       const results = await Promise.allSettled(destinations.slice(i, i + 4).map(clientId => drainDestination({
         store,
+        stopping: () => stopping,
         async sign(destination, events) {
           const { kid, privateKey } = await getSigningKey();
           const now = Math.floor(Date.now() / 1000);
@@ -72,7 +77,7 @@ export async function drainAll(): Promise<void> {
     }
     // Backoff and active leases are filtered in SQL, so successful overflow
     // continues after debounce without spinning on failed destinations.
-    if ((await store.destinations(1)).length) kickDrain();
+    if (!stopping && (await store.destinations(1)).length) kickDrain();
   } finally { draining = false; }
 }
 
@@ -84,6 +89,7 @@ const legacyRedis: LegacyRedis = {
   zrem: (key, member) => redis.zrem(key, member),
 };
 const importLegacy = createLegacyImporter({
+  stopping: () => stopping,
   redis: legacyRedis,
   async persist(clientId, event) {
     const { withRoleTransaction, publishRoleChanges } = await import('./rbac/roleChanges.js');
@@ -111,15 +117,23 @@ async function cleanupArchive(): Promise<void> {
 }
 
 export function startEventPump(): void {
-  if (started) return;
+  if (started || stopping) return;
   started = true;
   const sweep = (): void => {
-    drainAll().catch(() => report('sweep_failed'));
+    if (stopping) return;
+    void activeTasks.track(drainAll()).catch(() => report('sweep_failed'));
     // Redis availability cannot block current DB delivery. Exact old members
     // are removed only after their database transaction commits.
-    importLegacy().then(kickDrain).catch(() => report('legacy_import_unavailable'));
+    void activeTasks.track(importLegacy()).then(kickDrain).catch(() => report('legacy_import_unavailable'));
   };
   sweep();
-  setInterval(sweep, SWEEP_MS).unref();
-  setInterval(() => { cleanupArchive().catch(() => report('cleanup_failed')); }, 3_600_000).unref();
+  const sweepTimer=setInterval(sweep, SWEEP_MS),cleanupTimer=setInterval(() => { if(!stopping)void activeTasks.track(cleanupArchive()).catch(() => report('cleanup_failed')); }, 3_600_000);
+  for(const timer of [sweepTimer,cleanupTimer]){timer.unref();timers.add(timer);}
 }
+
+/** Pending DB events remain durable; finish owned claims without starting more. */
+export function stopEventPump():void {
+ stopping=true;if(debounce)clearTimeout(debounce);debounce=null;
+ for(const timer of timers)clearInterval(timer);timers.clear();
+}
+export async function settleEventPump():Promise<void>{await activeTasks.settle();}

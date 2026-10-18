@@ -191,9 +191,11 @@ function lockFile(file:string):string {
   finally{fs.closeSync(fd);}
   return lock;
 }
-interface WorkerJob {operation:'schedule'|'reconcile';result:Promise<void>}
+interface WorkerJob {operation:'schedule'|'reconcile';result:Promise<void>;closed:Promise<void>;kill?:()=>void}
 const workers=new Map<string,WorkerJob>(),signingCooldown=new Map<string,number>();
+let stoppingWorkers=false;
 async function mutate(file:string,operation:'schedule'|'reconcile'):Promise<void> {
+  if(stoppingWorkers)throw new ClientKeyStateError('client_key_rotation_unavailable');
   const running=workers.get(file);
   if(running){
     const hadPending=operation==='schedule'?!!read(file).state.pending:true;
@@ -210,13 +212,14 @@ async function mutate(file:string,operation:'schedule'|'reconcile'):Promise<void
   const worker=fileURLToPath(new URL(source?'./client-key-worker.ts':'./client-key-worker.js',import.meta.url));
   const loader=source?['--import',import.meta.resolve('tsx')]:[];
   let resolve!:()=>void,reject!:(error:Error)=>void;
-  const result=new Promise<void>((yes,no)=>{resolve=yes;reject=no;}),job:WorkerJob={operation,result};
+  let closed!:()=>void;const settledProcess=new Promise<void>(resolve=>{closed=resolve;});
+  const result=new Promise<void>((yes,no)=>{resolve=yes;reject=no;}),job:WorkerJob={operation,result,closed:settledProcess};
   workers.set(file,job);let settled=false,failed=false,bytes=0,output='';
   const finish=(ok:boolean)=>{if(settled)return;settled=true;if(ok)resolve();else reject(new ClientKeyStateError('client_key_rotation_unavailable'));};
   let child:ReturnType<typeof spawn>;
   try{child=spawn('/usr/bin/flock',['--exclusive','--wait','5','--no-fork',lock,process.execPath,...loader,worker,operation,file],{stdio:['ignore','pipe','pipe'],shell:false});}
-  catch{workers.delete(file);finish(false);return result;}
-  const stop=()=>{failed=true;child.kill('SIGKILL');finish(false);};
+  catch{workers.delete(file);closed();finish(false);return result;}
+  const stop=()=>{failed=true;child.kill('SIGKILL');finish(false);};job.kill=stop;
   const timer=setTimeout(stop,12_000);timer.unref();
   // EMFILE/ENFILE may return a ChildProcess with null streams, then emit
   // error/close on the next tick. Install lifecycle handlers before touching IO.
@@ -224,7 +227,7 @@ async function mutate(file:string,operation:'schedule'|'reconcile'):Promise<void
   child.once('close',code=>{
     clearTimeout(timer);if(workers.get(file)===job)workers.delete(file);
     let ok=false;try{const value=JSON.parse(output);ok=value?.ok===true&&Object.keys(value).length===1;}catch{/* No raw child output is exposed. */}
-    finish(!failed&&code===0&&ok);
+    finish(!failed&&code===0&&ok);closed();
   });
   if(!child.stdout||!child.stderr){failed=true;finish(false);return result;}
   child.stdout.on('data',(chunk:Buffer)=>{bytes+=chunk.length;if(bytes>16384)stop();else if(!failed)output+=chunk.toString('utf8');});
@@ -260,4 +263,13 @@ export async function getClientKeyStatus(file:string):Promise<ClientKeyStatus>{r
 export async function scheduleClientKeyRotation(file:string):Promise<ClientKeyStatus>{
   try{await mutate(file,'schedule');return status(read(file).state);}
   catch(error){if(error instanceof ClientKeyStateError)throw error;throw new ClientKeyStateError('client_key_storage_unavailable');}
+}
+
+/** Seal admission only after accepted requests drain; a timeout is not child settlement. */
+export async function stopClientKeyWorkers():Promise<void>{
+ stoppingWorkers=true;
+ while(workers.size)await Promise.all([...workers.values()].map(job=>job.closed));
+}
+export function killClientKeyWorkers():void {
+ stoppingWorkers=true;for(const job of workers.values())job.kill?.();
 }
