@@ -1,21 +1,28 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { listClients } from '../api.js';
+import { apiErrorMessage, listClients } from '../api.js';
 import Icon from '../Icon.jsx';
 import { SkelListRow } from '../Skel.jsx';
 
 export default function ClientsPage() {
   const nav = useNavigate();
   const [clients, setClients] = useState(null);
-  const [err, setErr] = useState(false);
+  const [err, setErr] = useState(null);
+  const sequence = useRef(0);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    const request = ++sequence.current;
+    setErr(null);
     listClients()
-      .then((d) => setClients(d.clients))
+      .then((d) => { if (request === sequence.current) setClients(d.clients); })
       .catch((e) => {
-        if (e.message !== 'unauthenticated') setErr(true);
+        if (request === sequence.current && !['unauthenticated', 'step_up_required'].includes(e.code || e.message)) setErr(e);
       });
   }, []);
+  useEffect(() => {
+    load();
+    return () => { sequence.current++; };
+  }, [load]);
 
   return (
     <>
@@ -27,14 +34,17 @@ export default function ClientsPage() {
         </button>
       </div>
       <p className="sub">Applications that sign in through DreamSSO.</p>
-      {err && <p className="err">Couldn't load clients.</p>}
+      {err && <div role="alert">
+        <p className="err">Couldn't load clients. {apiErrorMessage(err)}</p>
+        <button className="btn" onClick={load}>Retry</button>
+      </div>}
 
-      {clients === null ? (
+      {clients === null && !err ? (
         <div className="card">
           <SkelListRow icon="appwindow" chevron />
           <SkelListRow icon="appwindow" chevron />
         </div>
-      ) : (
+      ) : clients !== null ? (
         <div className="card">
           {clients.map((c) => (
             <button key={c.client_id} className="row row-link" onClick={() => nav('/clients/' + encodeURIComponent(c.client_id))}>
@@ -66,7 +76,7 @@ export default function ClientsPage() {
             </div>
           )}
         </div>
-      )}
+      ) : null}
     </>
   );
 }

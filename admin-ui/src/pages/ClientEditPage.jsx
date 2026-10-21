@@ -1,10 +1,14 @@
-import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  listClients, createClient, updateClient, disableClient, enableClient, deleteClient,
+  listClients, createClient, updateClient, disableClient, enableClient, deleteClient, apiErrorMessage,
 } from '../api.js';
 import Icon from '../Icon.jsx';
+import { ClientErrorContext, ErrorInput, ErrorGroup, OutcomePanel, SaveButton, useSaveFeedback, useScrollReserve } from '../SaveFeedback.jsx';
+import { feedbackTechnical, keyFieldFeedback } from '../saveFeedback.js';
 import { SkelInput, Ph } from '../Skel.jsx';
+import { normalizeClientErrors, activeClientErrors, hasBlockingClientErrors, clientErrorsForDisplay,
+  clearEditedServerErrors, changedClientFields, missingClientFields, removeRedirectErrors, clientErrorLabel } from '../clientFormErrors.js';
 // The SHARED normalization module — the same file the admin API runs server-side.
 import {
   normalizeHostname, normalizePath, normalizeSlug, normalizeName, composeUrl, decomposeUrl,
@@ -14,14 +18,13 @@ const SCOPES = ['openid', 'profile', 'email'];
 // First-party path conventions (the "fill standard paths" helper).
 const STD = { callback: '/auth/callback', events: '/backchannel/events', jwks: '/.well-known/jwks.json' };
 
-function Field({ label, note, error, children }) {
+function Field({ label, note, children }) {
   return (
     <label className="field">
       <span>
         {label} {note && <span className="note">({note})</span>}
       </span>
       {children}
-      {error && <span className="ferr">{error}</span>}
     </label>
   );
 }
@@ -51,27 +54,58 @@ const surface = (f) => JSON.stringify([
 
 export default function ClientEditPage() {
   const { id } = useParams(); // undefined for /clients/new
+  return <ClientEditForm key={id ?? 'new'} id={id} />;
+}
+
+function ClientEditForm({ id }) {
   const isNew = !id;
   const nav = useNavigate();
+  const mounted = useRef(true);
+  const loadSequence = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const [row, setRow] = useState(null); // server row (edit mode)
   const [f, setF] = useState(isNew ? emptyForm : null);
   const [snap, setSnap] = useState(isNew ? surface(emptyForm) : null);
   const [errs, setErrs] = useState({});
-  const [busy, setBusy] = useState(false);
-  const [loadErr, setLoadErr] = useState(false);
+  const [serverErrs, setServerErrs] = useState({});
+  const [busy, setBusy] = useState(false); // lifecycle actions only
+  const feedback = useSaveFeedback();
+  const scrollReserve = useScrollReserve();
+  const [outcomeErrors, setOutcomeErrors] = useState({});
+  const [technical, setTechnical] = useState('');
+  const [outcomeOpen, setOutcomeOpen] = useState(false);
+  const [outcomeKind, setOutcomeKind] = useState('save');
+  const [alertMessage, setAlertMessage] = useState('');
+  const saveLocked = feedback.state === 'pending' || feedback.state === 'success';
+  const formLocked = busy || saveLocked;
+  const [loadErr, setLoadErr] = useState(null);
   const [saveErr, setSaveErr] = useState(null);
+  const [saveUncertain, setSaveUncertain] = useState(false);
+  const [existingClientId, setExistingClientId] = useState(null);
   const [modal, setModal] = useState(null); // 'disable' | 'enable' | 'delete'
   const [deleteConfirm, setDeleteConfirm] = useState('');
   // jwks_uri that doesn't live on the client's hostname (e.g. a dev loopback) —
   // shown as-is; entering a path replaces it, leaving blank keeps it.
   const [externalJwksUri, setExternalJwksUri] = useState(null);
 
-  const load = () =>
-    listClients()
+  const load = () => {
+    const sequence = ++loadSequence.current;
+    setLoadErr(null);
+    setF(null);
+    return listClients()
       .then((d) => {
+        if (!mounted.current || sequence !== loadSequence.current) return;
         const c = d.clients.find((x) => x.client_id === id);
-        if (!c) return setLoadErr(true);
+        if (!c) {
+          const error = new Error('client_not_found');
+          error.code = 'client_not_found';
+          error.status = 404;
+          throw error;
+        }
         const jwksPath = c.jwks_uri ? decomposeUrl(c.jwks_uri, c.hostname) : null;
         setExternalJwksUri(c.jwks_uri && !jwksPath ? c.jwks_uri : null);
         const form = {
@@ -93,15 +127,31 @@ export default function ClientEditPage() {
         setF(form);
         setSnap(surface(form));
         setErrs({});
+        setServerErrs({});
+        setSaveErr(null);
+        setSaveUncertain(false);
+        setOutcomeOpen(false);
+        setOutcomeErrors({});
+        setTechnical('');
+        setAlertMessage('');
       })
       .catch((e) => {
-        if (e.message !== 'unauthenticated') setLoadErr(true);
+        if (!mounted.current || sequence !== loadSequence.current) return;
+        if (!['unauthenticated', 'step_up_required'].includes(e.code || e.message)) setLoadErr(e);
       });
+  };
   useEffect(() => {
     if (!isNew) load();
   }, [id]);
 
-  const set = (patch) => setF((cur) => ({ ...cur, ...patch }));
+  const set = (patch) => {
+    const changed = changedClientFields(f, patch);
+    if (Object.keys(changed).length === 0) return;
+    setF((cur) => ({ ...cur, ...changed }));
+    setServerErrs((cur) => clearEditedServerErrors(cur, changed));
+    if (Object.hasOwn(changed, 'client_id')) setExistingClientId(null);
+    // The last outcome stays readable while individual field marks clear.
+  };
   const setErr = (key, msg) => setErrs((cur) => ({ ...cur, [key]: msg || undefined }));
 
   // --- blur normalization (shared rules; red border on error) ---
@@ -163,15 +213,31 @@ export default function ClientEditPage() {
   };
 
   // --- validity + dirty gating ---
-  const hasErrors = Object.values(errs).some(Boolean);
-  const keyOk =
-    f && (f.key_mode === 'uri'
-      ? !!f.jwks_path || !!externalJwksUri
-      : !!f.jwks_text.trim() || !!row?.has_inline_jwks);
-  const requiredOk =
-    f && f.name && f.hostname && f.redirect_paths.some((p) => p) && keyOk && (!isNew || f.client_id);
+  const displayErrs = clientErrorsForDisplay(errs, serverErrs);
+  const summaryErrors = clientErrorsForDisplay(activeClientErrors(errs, f?.key_mode), serverErrs);
+  const hasErrors = hasBlockingClientErrors(errs, f?.key_mode);
+  const missing = missingClientFields(f, { isNew, externalJwksUri, hasInlineJwks: row?.has_inline_jwks });
+  const requiredOk = Boolean(f) && missing.length === 0;
   const dirty = f && surface(f) !== snap;
-  const canSave = !busy && !hasErrors && requiredOk && (isNew || dirty);
+  const canSave = !busy && feedback.state === 'idle' && !hasErrors && requiredOk && (isNew || dirty);
+  const panelErrors = { ...outcomeErrors, ...activeClientErrors(errs, f?.key_mode) };
+  const errorItems = Object.entries(panelErrors).filter(([, message]) => message);
+  const errorMarks = Object.fromEntries(errorItems.flatMap(([key, message], index) =>
+    summaryErrors[key] === message ? [[key, { number: index + 1, id: `rp-error-${index + 1}` }]] : []));
+  const showOutcome = outcomeOpen || hasErrors;
+  const canFocusError = (key) => {
+    if (key === 'jwks') return f?.key_mode === 'inline';
+    if (key === 'jwks_path') return f?.key_mode === 'uri';
+    if (key === 'client_id') return isNew;
+    const path = /^redirect_paths\.(\d+)$/.exec(key);
+    if (path) return Number(path[1]) < (f?.redirect_paths.length || 0);
+    return ['name', 'hostname', 'redirect_paths', 'events_path', 'allowed_scopes', 'is_first_party', 'entry_policy'].includes(key);
+  };
+  const focusField = (key) => {
+    const input = [...document.querySelectorAll('[data-error-key]')].find((node) => node.dataset.errorKey === key);
+    if (input && !input.disabled) input.focus();
+  };
+
 
   const buildBody = () => {
     const body = {
@@ -209,48 +275,111 @@ export default function ClientEditPage() {
   };
 
   const save = async () => {
-    setBusy(true);
+    if (!canSave || !feedback.begin()) return;
+    ++loadSequence.current;
+    setOutcomeKind('save');
+    setOutcomeOpen(false);
+    setOutcomeErrors({});
+    setTechnical('');
+    setAlertMessage('');
     setSaveErr(null);
+    setSaveUncertain(false);
+    setExistingClientId(null);
+    setServerErrs({});
     try {
       if (isNew) {
         const body = { client_id: f.client_id, ...buildBody() };
         // create requires explicit key material
         if (body.jwks_uri === undefined) body.jwks_uri = null;
         if (body.jwks === undefined) body.jwks = null;
-        await createClient(body);
-        nav('/clients/' + encodeURIComponent(f.client_id), { replace: true });
+        const created = await createClient(body);
+        if (!mounted.current) return;
+        feedback.finish('success', () => {
+          if (mounted.current) nav('/clients/' + encodeURIComponent(created.client.client_id), { replace: true });
+        }, true);
       } else {
         await updateClient(id, buildBody());
-        await load();
+        if (!mounted.current) return;
+        setSnap(surface(f));
+        // Refresh server metadata without replacing the successful form with a skeleton.
+        const sequence = ++loadSequence.current;
+        listClients().then((data) => {
+          if (!mounted.current || sequence !== loadSequence.current) return;
+          const current = data.clients.find((client) => client.client_id === id);
+          if (current) {
+            setRow(current);
+            const path = current.jwks_uri ? decomposeUrl(current.jwks_uri, current.hostname) : null;
+            setExternalJwksUri(current.jwks_uri && !path ? current.jwks_uri : null);
+          }
+        }).catch(() => { /* The save itself succeeded; metadata refresh is optional. */ });
+        feedback.finish('success');
       }
     } catch (e) {
-      if (e.message === 'unauthenticated') return;
-      if (e.status === 422 && e.data?.errors) setErrs((cur) => ({ ...cur, ...e.data.errors }));
-      else if (e.status === 409) setErr('client_id', 'This client ID is already taken');
-      else setSaveErr(`Couldn't save. [${e.data?.error || 'http_' + e.status}]`);
-    } finally {
-      setBusy(false);
+      if (!mounted.current) return;
+      if (['unauthenticated', 'step_up_required'].includes(e.code || e.message)) { feedback.reset(); return; }
+      setTechnical(feedbackTechnical(e));
+      setOutcomeOpen(true);
+      setOutcomeErrors({});
+      setAlertMessage(e.uncertain ? 'The save result could not be confirmed. Details follow the save button.'
+        : "Couldn't save. Details follow the save button.");
+      feedback.finish('error');
+      if (e.status === 422 && e.data?.errors) {
+        const fieldErrors = normalizeClientErrors(e.data.errors);
+        setServerErrs(fieldErrors);
+        setOutcomeErrors(fieldErrors);
+        setSaveErr(Object.keys(fieldErrors).length
+          ? "Couldn't save. Review the errors below, then try again."
+          : `Couldn't save. ${apiErrorMessage(e)}`);
+      } else if (isNew && e.status === 409 && (e.code === 'client_id_taken' || e.data?.error === 'client_id_taken')) {
+        setExistingClientId(normalizeSlug(f.client_id).value);
+        setServerErrs({ client_id: 'This client ID is already taken' });
+        setOutcomeErrors({ client_id: 'This client ID is already taken' });
+        setSaveErr("Couldn't save. This client ID is already taken. Open its existing registration or choose another ID.");
+      } else {
+        setSaveUncertain(Boolean(e.uncertain));
+        setSaveErr(e.uncertain
+          ? `The save result could not be confirmed. ${apiErrorMessage(e)}`
+          : `Couldn't save. ${apiErrorMessage(e)}`);
+      }
     }
   };
 
   const lifecycle = async (action) => {
+    if (busy || feedback.state !== 'idle') return;
+    setOutcomeKind('action');
     setBusy(true);
     setSaveErr(null);
+    setSaveUncertain(false);
+    setOutcomeOpen(false);
+    setOutcomeErrors({});
+    setTechnical('');
+    setAlertMessage('');
     try {
       if (action === 'disable') await disableClient(id);
       if (action === 'enable') await enableClient(id);
       if (action === 'delete') {
         await deleteClient(id);
+        if (!mounted.current) return;
         nav('/', { replace: true });
         return;
       }
+      if (!mounted.current) return;
       setModal(null);
       await load();
     } catch (e) {
-      if (e.message !== 'unauthenticated') setSaveErr(`Action failed. [${e.data?.error || 'http_' + e.status}]`);
+      if (!mounted.current) return;
+      if (!['unauthenticated', 'step_up_required'].includes(e.code || e.message)) {
+        setOutcomeOpen(true);
+        setTechnical(feedbackTechnical(e));
+        setAlertMessage(e.uncertain ? 'The action result could not be confirmed. Details follow the save button.' : 'Action failed. Details follow the save button.');
+        setSaveUncertain(Boolean(e.uncertain));
+        setSaveErr(e.uncertain
+          ? `The action result could not be confirmed. ${apiErrorMessage(e)}`
+          : `Action failed. ${apiErrorMessage(e)}`);
+      }
       setModal(null);
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
 
@@ -261,7 +390,10 @@ export default function ClientEditPage() {
           <Icon name="chevron" size={15} className="back-chev" />
           Clients
         </button>
-        <p className="err">Couldn't load this client.</p>
+        <p className="err" role="alert">Couldn't load this client. {loadErr.code === 'client_not_found'
+          ? 'This client registration could not be found.' : apiErrorMessage(loadErr)}</p>
+        {saveUncertain && <p className="err">{saveErr}</p>}
+        <button className="btn" onClick={load}>Retry</button>
       </>
     );
   }
@@ -288,8 +420,10 @@ export default function ClientEditPage() {
               </div>
               <button className="btn" style={{ marginTop: 22 }} disabled>Fill standard paths</button>
             </div>
-            <Field label="Redirect paths" note="the app's callback endpoint — exact match"><SkelInput /></Field>
-            <Field label="Back-channel events path" note="logout + role changes; optional"><SkelInput /></Field>
+            <ErrorGroup errorKey="redirect_paths">
+          <Field label="Redirect paths" note="the app's callback endpoint — exact match"><SkelInput /></Field>
+            </ErrorGroup>
+          <Field label="Back-channel events path" note="logout + role changes; optional"><SkelInput /></Field>
             <div className="grid2">
               <Field label="Allowed scopes"><SkelInput width={200} /></Field>
               <Field label="Trust &amp; entry"><SkelInput width={200} /></Field>
@@ -314,13 +448,15 @@ export default function ClientEditPage() {
       </h1>
       <p className="sub">{isNew ? 'Register an application to sign in through DreamSSO.' : 'OIDC client registration.'}</p>
 
-      <div className="card pad">
-        <div className="form">
+      <ClientErrorContext.Provider value={errorMarks}>
+      <div className="card pad rp-client-form">
+        <fieldset className="form" disabled={formLocked} aria-busy={formLocked} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <div className="grid2">
             {isNew ? (
-              <Field label="Client ID" note="immutable — lowercase slug" error={errs.client_id}>
-                <input
-                  className={'input mono' + (errs.client_id ? ' bad' : '')}
+              <Field label="Client ID" note="immutable — lowercase slug" error={displayErrs.client_id}>
+                <ErrorInput
+                  className={'input mono' + (errorMarks.client_id ? ' bad' : '')}
+                  errorKey="client_id"
                   value={f.client_id}
                   placeholder="e.g. videosite"
                   onChange={(e) => { set({ client_id: e.target.value }); setErr('client_id', null); }}
@@ -336,10 +472,11 @@ export default function ClientEditPage() {
                 <span className="hint">Can't be changed after creation</span>
               </Field>
             )}
-            <Field label="Display name" error={errs.name}>
-              <input
-                className={'input' + (errs.name ? ' bad' : '')}
-                value={f.name}
+            <Field label="Display name" error={displayErrs.name}>
+              <ErrorInput
+                className={'input' + (errorMarks.name ? ' bad' : '')}
+                errorKey="name"
+                  value={f.name}
                 onChange={(e) => { set({ name: e.target.value }); setErr('name', null); }}
                 onBlur={blurName}
               />
@@ -348,9 +485,10 @@ export default function ClientEditPage() {
 
           <div className="inline-row">
             <div className="grow">
-              <Field label="Hostname" note="https only — no scheme, path, or port" error={errs.hostname}>
-                <input
-                  className={'input mono' + (errs.hostname ? ' bad' : '')}
+              <Field label="Hostname" note="https only — no scheme, path, or port" error={displayErrs.hostname}>
+                <ErrorInput
+                  className={'input mono'}
+                  errorKey="hostname"
                   value={f.hostname}
                   placeholder="app.dreamxwarden.ca"
                   onChange={(e) => { set({ hostname: e.target.value }); setErr('hostname', null); }}
@@ -358,26 +496,28 @@ export default function ClientEditPage() {
                 />
               </Field>
             </div>
-            <button className="btn" style={{ marginTop: 22 }} onClick={fillStandard} disabled={!f.hostname || !!errs.hostname}>
+            <button className="btn" style={{ marginTop: 22 }} onClick={fillStandard} disabled={!f.hostname || !!displayErrs.hostname}>
               Fill standard paths
             </button>
           </div>
 
-          <Field label="Redirect paths" note="the app's callback endpoint — exact match" error={errs.redirect_paths}>
+          <ErrorGroup errorKey="redirect_paths">
+          <Field label="Redirect paths" note="the app's callback endpoint — exact match" error={displayErrs.redirect_paths}>
             {f.redirect_paths.map((p, i) => (
               <div className="uri-row" key={i}>
                 <div style={{ flex: 1 }}>
-                  <input
-                    className={'input mono' + (errs[`redirect_paths.${i}`] ? ' bad' : '')}
+                  <ErrorInput
+                    className={'input mono'}
+                    errorKey={`redirect_paths.${i}`}
                     value={p}
                     placeholder="/auth/callback"
                     onChange={(e) => {
                       set({ redirect_paths: f.redirect_paths.map((x, j) => (j === i ? e.target.value : x)) });
                       setErr(`redirect_paths.${i}`, null);
+                      setErr('redirect_paths', null);
                     }}
                     onBlur={() => blurPath('redirect_paths', i)}
                   />
-                  {errs[`redirect_paths.${i}`] && <span className="ferr">{errs[`redirect_paths.${i}`]}</span>}
                 </div>
                 {f.redirect_paths.length > 1 && (
                   <button
@@ -386,7 +526,7 @@ export default function ClientEditPage() {
                     aria-label="Remove redirect path"
                     onClick={() => {
                       set({ redirect_paths: f.redirect_paths.filter((_, j) => j !== i) });
-                      setErr(`redirect_paths.${i}`, null);
+                      setErrs((cur) => removeRedirectErrors(cur, i));
                     }}
                   >
                     <Icon name="trash" size={15} />
@@ -400,10 +540,12 @@ export default function ClientEditPage() {
             </button>
           </Field>
 
-          <Field label="Back-channel events path" note="logout + role changes; optional" error={errs.events_path}>
-            <input
-              className={'input mono' + (errs.events_path ? ' bad' : '')}
-              value={f.events_path}
+          </ErrorGroup>
+          <Field label="Back-channel events path" note="logout + role changes; optional" error={displayErrs.events_path}>
+            <ErrorInput
+              className={'input mono'}
+              errorKey="events_path"
+                  value={f.events_path}
               placeholder="/api/backchannel-logout"
               onChange={(e) => { set({ events_path: e.target.value }); setErr('events_path', null); }}
               onBlur={() => blurPath('events_path')}
@@ -414,11 +556,11 @@ export default function ClientEditPage() {
             <span>Client key</span>
             <div className="radio-line" style={{ marginBottom: 8 }}>
               <label>
-                <input type="radio" checked={f.key_mode === 'uri'} onChange={() => set({ key_mode: 'uri' })} />
+                <ErrorInput type="radio" checked={f.key_mode === 'uri'} onChange={() => set({ key_mode: 'uri' })} />
                 Fetch from jwks_uri
               </label>
               <label>
-                <input type="radio" checked={f.key_mode === 'inline'} onChange={() => set({ key_mode: 'inline' })} />
+                <ErrorInput type="radio" checked={f.key_mode === 'inline'} onChange={() => set({ key_mode: 'inline' })} />
                 Paste public JWKS
               </label>
             </div>
@@ -432,14 +574,14 @@ export default function ClientEditPage() {
             )}
             {f.key_mode === 'uri' ? (
               <>
-                <input
-                  className={'input mono' + (errs.jwks_path ? ' bad' : '')}
+                <ErrorInput
+                  className={'input mono'}
+                  errorKey="jwks_path"
                   value={f.jwks_path}
                   placeholder="/.well-known/jwks.json"
                   onChange={(e) => { set({ jwks_path: e.target.value }); setErr('jwks_path', null); }}
                   onBlur={() => blurPath('jwks_path')}
                 />
-                {errs.jwks_path && <span className="ferr">{errs.jwks_path}</span>}
                 {externalJwksUri && !f.jwks_path && (
                   <p className="hint">
                     Currently external: <span className="mono">{externalJwksUri}</span> — enter a path to replace it, or
@@ -449,14 +591,14 @@ export default function ClientEditPage() {
               </>
             ) : (
               <>
-                <textarea
-                  className={'input mono' + (errs.jwks ? ' bad' : '')}
+                <ErrorInput as="textarea"
+                  className={'input mono'}
+                  errorKey="jwks"
                   value={f.jwks_text}
                   placeholder='{"keys":[{"kty":"OKP","crv":"Ed25519", ...}]}'
                   onChange={(e) => { set({ jwks_text: e.target.value }); setErr('jwks', null); }}
                   onBlur={blurJwksText}
                 />
-                {errs.jwks && <span className="ferr">{errs.jwks}</span>}
                 {row?.jwks_uri && f.jwks_text.trim() && (
                   <p className="hint">These are the keys last fetched from the jwks_uri.</p>
                 )}
@@ -470,62 +612,85 @@ export default function ClientEditPage() {
           <div className="grid2">
             <div className="field">
               <span>Allowed scopes</span>
-              <div className="checks">
+              <ErrorGroup errorKey="allowed_scopes" className="checks">
                 {SCOPES.map((s) => (
                   <label key={s}>
-                    <input
+                    <ErrorInput
                       type="checkbox"
                       checked={f.allowed_scopes.includes(s)}
                       disabled={s === 'openid'}
-                      onChange={(e) =>
+                      onChange={(e) => {
                         set({
                           allowed_scopes: e.target.checked
                             ? [...f.allowed_scopes, s]
                             : f.allowed_scopes.filter((x) => x !== s),
-                        })
-                      }
+                        });
+                        setErr('allowed_scopes', null);
+                      }}
                     />
                     {s}
                   </label>
                 ))}
-              </div>
+              </ErrorGroup>
             </div>
             <div className="field">
               <span>Trust &amp; entry</span>
               <div className="checks">
-                <label>
-                  <input
+                <ErrorGroup errorKey="is_first_party"><label>
+                  <ErrorInput
                     type="checkbox"
                     checked={f.is_first_party}
-                    onChange={(e) => set({ is_first_party: e.target.checked })}
+                    onChange={(e) => { set({ is_first_party: e.target.checked }); setErr('is_first_party', null); }}
                   />
                   First-party
-                </label>
-                <label>
+                </label></ErrorGroup>
+                <ErrorGroup errorKey="entry_policy"><label>
                   Entry:&nbsp;
                   <select
                     className="input"
                     style={{ width: 'auto', padding: '4px 8px' }}
                     value={f.entry_policy}
-                    onChange={(e) => set({ entry_policy: e.target.value })}
+                    onChange={(e) => { set({ entry_policy: e.target.value }); setErr('entry_policy', null); }}
                   >
                     <option value="opt_in">opt_in</option>
                     <option value="baseline">baseline</option>
                   </select>
-                </label>
+                </label></ErrorGroup>
               </div>
             </div>
           </div>
 
-          {saveErr && <p className="err">{saveErr}</p>}
-          <div className="form-actions">
-            <button className="btn btn-primary" onClick={save} disabled={!canSave}>
-              {busy ? 'Saving…' : isNew ? 'Register client' : 'Save changes'}
-            </button>
-            {!isNew && !dirty && <span className="dirty-note">No unsaved changes</span>}
+        </fieldset>
+          <div className="form-actions rp-form-actions">
+            <SaveButton state={feedback.state} label={isNew ? 'Register client' : 'Save changes'}
+              disabled={!canSave} onClick={save} describedBy={'rp-action-note' + (showOutcome ? ' rp-outcome-title' : '')} />
+            <span className="rp-action-note" id="rp-action-note">
+              {missing.length > 0 ? `Required: ${missing.join(', ')}.`
+                : hasErrors ? 'Correct the marked fields before saving.'
+                  : !isNew && !dirty ? 'No unsaved changes' : ''}
+            </span>
           </div>
-        </div>
+          <OutcomePanel open={showOutcome && feedback.state !== 'pending'}
+            title={saveUncertain ? 'Could not confirm the result' : saveErr ? (outcomeKind === 'action' ? 'Action failed' : "Couldn't save") : 'Review these fields'}
+            technical={technical} reserve={scrollReserve.reserve} release={scrollReserve.release}>
+            {saveErr && <p>{saveErr}</p>}
+            {saveUncertain && isNew && <p><Link to="/clients">Check the client list</Link> before trying again; the registration may already exist.</p>}
+            {saveUncertain && !isNew && <p><button className="btn" onClick={load} disabled={formLocked}>Reload registration</button></p>}
+            {existingClientId && <p><Link to={'/clients/' + encodeURIComponent(existingClientId)}>Open existing registration</Link></p>}
+            {errorItems.length > 0 && <ol className="rp-error-list">{errorItems.map(([key, message], index) => (
+              <li key={key} id={`rp-error-${index + 1}`} className={errorMarks[key] ? '' : 'rp-error-edited'}>
+                <span className="rp-error-number" aria-hidden="true">{index + 1}</span>
+                <div>{canFocusError(key) ? <button type="button" className="rp-error-link" onClick={() => focusField(key)}>{clientErrorLabel(key)}</button> : <strong>{clientErrorLabel(key)}</strong>}
+                  {!errorMarks[key] && <span className="rp-edited-tag">Edited</span>}
+                  <p>{keyFieldFeedback(key, message).message}</p></div>
+              </li>
+            ))}</ol>}
+          </OutcomePanel>
+          <div className="rp-sr-only" role="status">{feedback.state === 'pending' ? (isNew ? 'Registering client…' : 'Saving changes…') : feedback.state === 'success' ? (isNew ? 'Client registered.' : 'Changes saved.') : ''}</div>
+          <div className="rp-sr-only" role="alert">{feedback.state === 'pending' ? '' : alertMessage}</div>
       </div>
+
+      </ClientErrorContext.Provider>
 
       {!isNew && row?.is_system && (
         <div className="card pad">
@@ -546,18 +711,18 @@ export default function ClientEditPage() {
             </p>
             <span style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
               {row?.disabled_at ? (
-                <button className="btn" onClick={() => setModal('enable')} disabled={busy}>
+                <button className="btn" onClick={() => setModal('enable')} disabled={busy || feedback.state !== 'idle'}>
                   Enable
                 </button>
               ) : (
-                <button className="btn btn-danger" onClick={() => setModal('disable')} disabled={busy}>
+                <button className="btn btn-danger" onClick={() => setModal('disable')} disabled={busy || feedback.state !== 'idle'}>
                   Disable
                 </button>
               )}
               <button
                 className="btn btn-danger"
                 onClick={() => { setDeleteConfirm(''); setModal('delete'); }}
-                disabled={busy || !row?.disabled_at}
+                disabled={busy || feedback.state !== 'idle' || !row?.disabled_at}
                 title={row?.disabled_at ? undefined : 'Disable first'}
               >
                 Delete…
@@ -573,10 +738,10 @@ export default function ClientEditPage() {
             All sign-ins to this application stop immediately. Existing app sessions are not terminated.
           </p>
           <div className="modal-actions">
-            <button className="btn btn-danger" onClick={() => lifecycle('disable')} disabled={busy}>
+            <button className="btn btn-danger" onClick={() => lifecycle('disable')} disabled={busy || feedback.state !== 'idle'}>
               {busy ? 'Disabling…' : 'Disable'}
             </button>
-            <button className="btn" onClick={() => setModal(null)} disabled={busy}>
+            <button className="btn" onClick={() => setModal(null)} disabled={busy || feedback.state !== 'idle'}>
               Cancel
             </button>
           </div>
@@ -586,10 +751,10 @@ export default function ClientEditPage() {
         <Modal title={`Enable ${row?.name}?`} onClose={() => setModal(null)}>
           <p className="modal-msg">Sign-ins to this application resume immediately.</p>
           <div className="modal-actions">
-            <button className="btn btn-primary" onClick={() => lifecycle('enable')} disabled={busy}>
+            <button className="btn btn-primary" onClick={() => lifecycle('enable')} disabled={busy || feedback.state !== 'idle'}>
               {busy ? 'Enabling…' : 'Enable'}
             </button>
-            <button className="btn" onClick={() => setModal(null)} disabled={busy}>
+            <button className="btn" onClick={() => setModal(null)} disabled={busy || feedback.state !== 'idle'}>
               Cancel
             </button>
           </div>
@@ -601,7 +766,7 @@ export default function ClientEditPage() {
             This permanently deletes the registration, its keys, and all related grants.{' '}
             <strong>This cannot be undone.</strong> Type <span className="mono">{id}</span> to confirm.
           </p>
-          <input
+          <ErrorInput
             className="input mono"
             value={deleteConfirm}
             autoFocus
@@ -612,16 +777,17 @@ export default function ClientEditPage() {
             <button
               className="btn btn-danger"
               onClick={() => lifecycle('delete')}
-              disabled={busy || deleteConfirm !== id}
+              disabled={busy || feedback.state !== 'idle' || deleteConfirm !== id}
             >
               {busy ? 'Deleting…' : 'Delete permanently'}
             </button>
-            <button className="btn" onClick={() => setModal(null)} disabled={busy}>
+            <button className="btn" onClick={() => setModal(null)} disabled={busy || feedback.state !== 'idle'}>
               Cancel
             </button>
           </div>
         </Modal>
       )}
+      <div ref={scrollReserve.spacer} aria-hidden="true" />
     </>
   );
 }

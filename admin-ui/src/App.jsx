@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Routes, Route, NavLink, Outlet, Navigate } from 'react-router-dom';
-import { getMe, getPublicSettings } from './api.js';
+import { getMe, getPublicSettings, apiErrorMessage } from './api.js';
 import Icon from './Icon.jsx';
 import ClientsPage from './pages/ClientsPage.jsx';
 import ClientEditPage from './pages/ClientEditPage.jsx';
@@ -124,6 +124,13 @@ const readCachedSiteName = () => {
 
 export default function App() {
   const [me, setMe] = useState(null);
+  const [meError, setMeError] = useState(null);
+  const loadMe = useCallback(() => {
+    setMeError(null);
+    getMe().then(setMe).catch((e) => {
+      if (e.code !== 'unauthenticated' && e.code !== 'step_up_required') setMeError(e);
+    });
+  }, []);
   const [siteName, setSiteName] = useState(readCachedSiteName);
   const refreshSite = useCallback(() => {
     getPublicSettings()
@@ -137,9 +144,9 @@ export default function App() {
       .catch(() => {});
   }, []);
   useEffect(() => {
-    getMe().then(setMe).catch(() => {});
+    loadMe();
     refreshSite();
-  }, [refreshSite]);
+  }, [refreshSite, loadMe]);
   // Tab title follows the admin-editable site name; skip while unknown.
   useEffect(() => {
     if (siteName) document.title = `${siteName} Admin`;
@@ -154,8 +161,16 @@ export default function App() {
           <div className="side" />
           <main className="content">
             <div className="content-inner">
-              <div className="skel" style={{ width: '60%', height: 24, marginBottom: 14 }} />
-              <div className="skel" style={{ width: '100%', height: 160 }} />
+              {meError ? (
+                <div className="card pad" role="alert">
+                  <h1>Couldn't load the admin console</h1>
+                  <p className="err">{apiErrorMessage(meError)}</p>
+                  <button className="btn btn-primary" onClick={loadMe}>Try again</button>
+                </div>
+              ) : <>
+                <div className="skel" style={{ width: '60%', height: 24, marginBottom: 14 }} />
+                <div className="skel" style={{ width: '100%', height: 160 }} />
+              </>}
             </div>
           </main>
         </div>
