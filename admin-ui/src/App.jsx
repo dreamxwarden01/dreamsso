@@ -101,7 +101,7 @@ function Shell({ me, siteName, refreshSite }) {
         </nav>
         <main className="content">
           <div className="content-inner">
-            <Outlet context={{ refreshSite }} />
+            <Outlet context={{ refreshSite, subject: me.sub }} />
           </div>
         </main>
       </div>

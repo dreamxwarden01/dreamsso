@@ -85,3 +85,10 @@ test('known JWKS diagnostics show actionable copy while preserving only parsed s
   assert.equal(keyFieldFeedback('name', message).technical, undefined);
   assert.equal(keyFieldFeedback('jwks', 'JWKS check failed (PRIVATE_URL: secret)').technical, undefined);
 });
+
+
+test('oversized JWKS documents have a safe actionable explanation', () => {
+  const result = keyFieldFeedback('jwks_uri', 'JWKS check failed (ERR_JWKS_RESPONSE_TOO_LARGE: jwks_response_too_large)');
+  assert.match(result.message, /too large/);
+  assert.equal(result.technical, 'jwks_uri: ERR_JWKS_RESPONSE_TOO_LARGE: jwks_response_too_large');
+});

@@ -1,5 +1,14 @@
 // Admin API errors retain machine codes; views decide how to present them.
 let csrf = null;
+const authBounceListeners = new Set();
+export function beforeAuthBounce(listener) {
+  authBounceListeners.add(listener);
+  return () => authBounceListeners.delete(listener);
+}
+function preserveBeforeAuthBounce(context) {
+  // Storage failures must never interrupt login/verification.
+  for (const listener of authBounceListeners) { try { listener(context); } catch { /* best effort */ } }
+}
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 function apiError(code, status = 0, data = null, uncertain = false) {
@@ -71,6 +80,7 @@ async function req(path, opts = {}) {
     if (settled) throw apiError('request_timeout', status, null, mutating);
     status = r.status;
     if (status === 401) {
+      preserveBeforeAuthBounce({ reason: 'unauthenticated', mutating, path });
       const next = location.pathname.startsWith('/admin') ? location.pathname : '/admin';
       location.href = '/admin/start-login?next=' + encodeURIComponent(next);
       throw apiError('unauthenticated', status);
@@ -83,6 +93,7 @@ async function req(path, opts = {}) {
     if (settled) throw apiError('request_timeout', status, null, mutating);
     if (!r.ok) {
       if (status === 403 && data?.error === 'step_up_required') {
+        preserveBeforeAuthBounce({ reason: 'step_up_required', mutating, path });
         location.reload();
         throw apiError('step_up_required', status, data);
       }
@@ -110,7 +121,7 @@ async function req(path, opts = {}) {
 
 export async function getMe() {
   const me = await req('/me', { timeoutMs: 15_000,
-    validate: (d) => isObject(d) && typeof d.csrf === 'string' && d.csrf.length > 0 });
+    validate: (d) => isObject(d) && typeof d.csrf === 'string' && d.csrf.length > 0 && typeof d.sub === 'string' && d.sub.length > 0 });
   csrf = me.csrf;
   return me;
 }

@@ -147,3 +147,128 @@ test('existing registered HTTP endpoints retain runtime behavior without broaden
     assert.equal(count, 1);
   } finally { server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())); }
 });
+
+// The network timeout is an aggregate deadline, including an already received
+// 200 response whose body never finishes. These fixtures use no external hosts.
+import { fetchClientJwks, ClientJwksTooLarge } from '../src/clientJwksTransport.js';
+
+async function transportFixture(handler: http.RequestListener) {
+  const server = http.createServer(handler);
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}/jwks`),
+    async close() { server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())); },
+  };
+}
+
+test('whole-response timeout aborts a stalled header and closes the socket', async () => {
+  let closed!: () => void;
+  const socketClosed = new Promise<void>(resolve => { closed = resolve; });
+  const f = await transportFixture((_req, res) => { res.on('close', closed); });
+  try {
+    await assert.rejects(fetchClientJwks(f.url, { timeoutMs: 160 }), errors.JWKSTimeout);
+    await Promise.race([socketClosed, new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('Transport socket was not closed')), 1000);timer.unref();
+    })]);
+  } finally { await f.close(); }
+});
+
+test('headers and continuing trickle bytes do not reset the whole-response deadline', async () => {
+  let writes = 0;
+  let closed!: () => void;
+  const socketClosed = new Promise<void>(resolve => { closed = resolve; });
+  const f = await transportFixture((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });res.write('{"keys":[');
+    const interval = setInterval(() => { writes++;res.write(' '); }, 20);
+    res.on('close', () => { clearInterval(interval);closed(); });
+  });
+  try {
+    const start = performance.now();
+    await assert.rejects(fetchClientJwks(f.url, { timeoutMs: 180 }), errors.JWKSTimeout);
+    assert.ok(performance.now() - start < 1500);
+    assert.ok(writes > 0);
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([socketClosed, new Promise((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error('Trickle socket was not closed')), 1000);
+      })]);
+    } finally { clearTimeout(watchdog); }
+  } finally { await f.close(); }
+});
+
+test('body limit covers both declared and chunked sizes, with no raw-content diagnostic', async () => {
+  let declared = true;
+  const f = await transportFixture((_req, res) => {
+    res.writeHead(200, { ...(declared ? { 'Content-Length': '9999' } : {}) });
+    res.end('synthetic-private-value'.repeat(5));
+  });
+  try {
+    for (const flag of [true, false]) {
+      declared = flag;
+      await assert.rejects(fetchClientJwks(f.url, { maxBytes: 32 }), ClientJwksTooLarge);
+    }
+    assert.deepEqual(safeKeyError(new ClientJwksTooLarge()), {
+      code: 'ERR_JWKS_RESPONSE_TOO_LARGE', reason: 'jwks_response_too_large',
+    });
+  } finally { await f.close(); }
+});
+
+test('complete exact-limit bodies parse; partial or malformed documents fail', async () => {
+  let mode = 'valid';
+  const body = JSON.stringify({ keys: [first] });
+  const f = await transportFixture((_req, res) => {
+    if (mode === 'partial') { res.writeHead(200, { 'Content-Length': '9999' });res.end(body);return; }
+    res.end(mode === 'valid' ? body : '{bad-json');
+  });
+  try {
+    assert.deepEqual(await fetchClientJwks(f.url, { maxBytes: Buffer.byteLength(body) }), { keys: [first] });
+    mode = 'bad';await assert.rejects(fetchClientJwks(f.url), /Failed to parse/);
+    mode = 'partial';await assert.rejects(fetchClientJwks(f.url, { timeoutMs: 120 }));
+  } finally { await f.close(); }
+});
+
+test('registration and runtime deadlines release their fetch slots for a later successful retry', async () => {
+  let stall = true, count = 0, closed = 0;
+  const events: KeyDiagnostic[] = [], resolver = new ClientKeyResolver(event => events.push(event));
+  const f = await transportFixture((_req, res) => {
+    count++;
+    if (stall) { res.writeHead(200);res.write('{');res.on('close', () => closed++); }
+    else res.end(JSON.stringify({ keys: [first] }));
+  });
+  const client = { client_id: 'timeout-fixture', jwks_uri: f.url.href, jwks: { keys: [first] } };
+  try {
+    const token = await signed();
+    const outcomes = await Promise.all([
+      resolver.verifyUri(f.url.href),
+      ...Array.from({ length: 6 }, () => assert.rejects(jwtVerify(token, resolver.keySet(client)!), errors.JWKSTimeout)),
+    ]);
+    assert.ok(outcomes[0]?.error?.includes('jwks_timeout'));
+    assert.equal(count, 2); // One registration probe and one coalesced runtime read.
+    assert.ok(events.every(event => event.error_code === 'ERR_JWKS_TIMEOUT'));
+    stall = false;
+    await jwtVerify(token, resolver.keySet(client)!);
+    assert.equal((await resolver.verifyUri(f.url.href)).error, null);
+    assert.equal(count, 4);assert.equal(closed, 2);
+  } finally { await f.close(); }
+});
+
+test('elapsed cooldown permits unknown-kid refresh and expired keys never mask a fetch failure', async (t) => {
+  const f = await fixture(), resolver = new ClientKeyResolver(() => {});
+  const client = { client_id: 'time-fixture', jwks_uri: f.url, jwks: { keys: [first] } };
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  try {
+    const key = resolver.keySet(client)!;
+    await key({ alg: 'EdDSA', kid: 'synthetic-a' }, { payload: new Uint8Array(), protected: '', signature: new Uint8Array() });
+    f.body = JSON.stringify({ keys: [first, second] });
+    now += 30_001;
+    await key({ alg: 'EdDSA', kid: 'synthetic-b' }, { payload: new Uint8Array(), protected: '', signature: new Uint8Array() });
+    assert.equal(f.count, 2);
+    now += 600_001;f.status = 503;
+    await assert.rejects(key({ alg: 'EdDSA', kid: 'synthetic-a' }, { payload: new Uint8Array(), protected: '', signature: new Uint8Array() }));
+    assert.equal(f.count, 3);
+    f.status = 200;
+    await key({ alg: 'EdDSA', kid: 'synthetic-a' }, { payload: new Uint8Array(), protected: '', signature: new Uint8Array() });
+    assert.equal(f.count, 4);
+  } finally { await f.close(); }
+});

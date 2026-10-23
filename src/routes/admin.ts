@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { adminReturnPath } from '../adminReturnPath.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { Router, type Request, type Response, type NextFunction } from 'express';
@@ -85,7 +86,7 @@ adminRouter.use('/admin/assets', express.static(path.join(ADMIN_DIST, 'assets'),
 adminRouter.get(['/admin', '/admin/clients', '/admin/clients/:id', '/admin/keys', '/admin/settings'],
   async (req: Request, res: Response) => {
     const session = await loadSession(req);
-    if (!session) return res.redirect('/admin/start-login');
+    if (!session) return res.redirect('/admin/start-login?next=' + encodeURIComponent(adminReturnPath(req.path)));
     const siteName = (await getSetting('site_name', 'DreamSSO'))!;
     if (!(await hasPerm(session.userSub, 'org.siteSettings.sso'))) {
       const nonce = htmlNonce(res);
@@ -121,7 +122,7 @@ adminRouter.get(['/admin', '/admin/clients', '/admin/clients/:id', '/admin/keys'
           'SELECT username, display_name FROM identities WHERE sub = $1',
           [session.userSub],
         );
-        const next = req.path.startsWith('/admin') ? req.path : '/admin';
+        const next = adminReturnPath(req.path);
         const txnId = await createTxn({
           clientId: '', redirectUri: '', codeChallenge: '', codeChallengeMethod: '', scope: '',
           clientName: `${siteName} Admin`, localNext: next,
@@ -159,8 +160,7 @@ adminRouter.get(['/admin', '/admin/clients', '/admin/clients/:id', '/admin/keys'
 // GET /admin/start-login — local first-party login bounce for the panel. No OIDC
 // client: the txn carries a local `next` path and POST /login just opens a session.
 adminRouter.get('/admin/start-login', async (req: Request, res: Response) => {
-  const raw = typeof req.query.next === 'string' ? req.query.next : '/admin';
-  const next = raw.startsWith('/') && !raw.startsWith('//') ? raw : '/admin';
+  const next = adminReturnPath(req.query.next);
   const txnId = await createTxn({
     clientId: '', redirectUri: '', codeChallenge: '', codeChallengeMethod: '', scope: '',
     clientName: `${(await getSetting('site_name', 'DreamSSO'))!} Admin`, localNext: next,
@@ -199,6 +199,7 @@ adminRouter.get('/admin/api/me', async (req: AdminRequest, res: Response) => {
     await redis.set(CSRF_KEY(s.sid), csrf, 'EX', CSRF_TTL);
   }
   res.json({
+    sub: s.userSub,
     username: id?.username,
     display_name: id?.display_name,
     email: id?.email ?? null,

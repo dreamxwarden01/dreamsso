@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useOutletContext } from 'react-router-dom';
 import {
-  listClients, createClient, updateClient, disableClient, enableClient, deleteClient, apiErrorMessage,
+  listClients, createClient, updateClient, disableClient, enableClient, deleteClient, apiErrorMessage, beforeAuthBounce,
 } from '../api.js';
 import Icon from '../Icon.jsx';
+import { writeClientDraft, readClientDraft, restoreClientDraft, clearClientDraft, clientDraftAuthUncertain, settleClientDraft, rebaseClientDraftForm, observeClientDraftSettlement } from '../clientDraft.js';
 import { ClientErrorContext, ErrorInput, ErrorGroup, OutcomePanel, SaveButton, useSaveFeedback, useScrollReserve } from '../SaveFeedback.jsx';
 import { feedbackTechnical, keyFieldFeedback } from '../saveFeedback.js';
 import { SkelInput, Ph } from '../Skel.jsx';
@@ -48,27 +49,98 @@ const emptyForm = {
 
 // What "dirty" compares (the submittable surface of the form).
 const surface = (f) => JSON.stringify([
-  f.name, f.hostname, f.redirect_paths, f.events_path,
+  f.client_id, f.name, f.hostname, f.redirect_paths, f.events_path,
   f.key_mode, f.jwks_path, f.jwks_text, f.allowed_scopes, f.is_first_party, f.entry_policy,
 ]);
 
-export default function ClientEditPage() {
-  const { id } = useParams(); // undefined for /clients/new
-  return <ClientEditForm key={id ?? 'new'} id={id} />;
+function clientFormFromRow(c) {
+  const jwksPath = c.jwks_uri ? decomposeUrl(c.jwks_uri, c.hostname) : null;
+  return {
+    client_id: c.client_id,
+    name: c.name,
+    hostname: c.hostname,
+    redirect_paths: c.redirect_paths.length ? c.redirect_paths : [''],
+    events_path: c.events_path ?? '',
+    key_mode: c.jwks_uri ? 'uri' : 'inline',
+    jwks_path: jwksPath ?? '',
+    // Show the registered public JWKS (it's public material) — an empty
+    // box here read as "no key configured".
+    jwks_text: c.jwks ? JSON.stringify(c.jwks, null, 2) : '',
+    allowed_scopes: c.allowed_scopes,
+    is_first_party: c.is_first_party,
+    entry_policy: c.entry_policy,
+  };
 }
 
-function ClientEditForm({ id }) {
+export default function ClientEditPage() {
+  const { id } = useParams(); // undefined for /clients/new
+  const { subject } = useOutletContext();
+  return <ClientEditForm key={JSON.stringify([subject, id ?? 'new'])} id={id} subject={subject} />;
+}
+
+function ClientEditForm({ id, subject }) {
   const isNew = !id;
+  const draftRoute = isNew ? 'new' : 'client:' + id;
+  const baseForm = useRef(emptyForm);
+  const draftState = useRef(null);
+  const draftDisabled = useRef(false);
+  const recoveredObservation = useRef(null);
+  const [draftSettled, setDraftSettled] = useState(false);
+  const stopRecoveredObservation = () => {
+    recoveredObservation.current?.();
+    recoveredObservation.current = null;
+    if (draftState.current) draftState.current.restoredOperationId = null;
+  };
+  const [draftNotice, setDraftNotice] = useState('');
+  const [draftStorageNotice, setDraftStorageNotice] = useState('');
+  const [draftOmitted, setDraftOmitted] = useState([]);
+  const draftWarning = (result) => [
+    result.restored.length ? 'Unsaved edits restored in this tab. Review them before saving.' : '',
+    result.conflicts.length ? 'Some edits were discarded because the registration changed. Review the current server values.' : '',
+    result.discarded ? 'The registration is disabled; its draft was discarded.' : '',
+    result.uncertain ? 'The previous result could not be confirmed. Check the client list or current registration before manually trying again.' : '',
+  ].filter(Boolean).join(' ');
+  const restore = (current, disabled = false) => {
+    const d = readClientDraft({ owner: subject, route: draftRoute });
+    const result = restoreClientDraft(d, current, { isNew, disabled });
+    setDraftNotice(draftWarning(result));
+    setDraftOmitted(result.discarded ? [] : result.omitted);
+    if (result.discarded || result.conflicts.length) clearClientDraft(subject, draftRoute);
+    stopRecoveredObservation();
+    setDraftSettled(false);
+    const pending = !result.discarded && d?.operationId;
+    if (pending) recoveredObservation.current = observeClientDraftSettlement({ owner: subject, route: draftRoute, operationId: pending }, (event) => {
+      const current = draftState.current;
+      if (!current || current.restoredOperationId !== pending) return;
+      stopRecoveredObservation();
+      setSaveUncertain(event.uncertain);
+      if (event.success) {
+        draftDisabled.current = true;
+        draftState.current = null;
+        setDraftSettled(true);
+        setDraftOmitted([]);
+        setDraftStorageNotice('');
+        setDraftNotice('The previous action completed successfully. Check the client list or reload this registration before making another change.');
+      } else {
+        draftState.current = { ...current, operationId: null, restoredOperationId: null,
+          uncertain: event.uncertain, priorUnknown: event.uncertain };
+        setDraftNotice(draftWarning({ ...result, uncertain: event.uncertain }));
+      }
+    });
+    return { ...result, restoredOperationId: pending || null, createdAt: result.discarded ? undefined : d?.savedAt };
+  };
   const nav = useNavigate();
   const mounted = useRef(true);
   const loadSequence = useRef(0);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    return () => { mounted.current = false; stopRecoveredObservation(); };
   }, []);
 
   const [row, setRow] = useState(null); // server row (edit mode)
   const [f, setF] = useState(isNew ? emptyForm : null);
+  const latestForm = useRef(f);
+  latestForm.current = f;
   const [snap, setSnap] = useState(isNew ? surface(emptyForm) : null);
   const [errs, setErrs] = useState({});
   const [serverErrs, setServerErrs] = useState({});
@@ -92,7 +164,49 @@ function ClientEditForm({ id }) {
   // shown as-is; entering a path replaces it, leaving blank keeps it.
   const [externalJwksUri, setExternalJwksUri] = useState(null);
 
-  const load = () => {
+  const persistDraft = (bounce) => {
+    const current = draftState.current;
+    if (!current?.form || draftDisabled.current) return;
+    const mutationPath = isNew ? '/clients' : '/clients/' + encodeURIComponent(id);
+    current.uncertain = clientDraftAuthUncertain(current.uncertain, bounce, mutationPath, current.priorUnknown);
+    const result = writeClientDraft({ owner: subject, route: draftRoute, ...current, operationId: current.operationId ?? current.restoredOperationId ?? null });
+    if (result.savedAt !== undefined) current.createdAt = result.savedAt;
+    setDraftStorageNotice(result.reason === 'expired'
+      ? 'Draft recovery has expired. Keep this page open until you save, or copy the public configuration before signing in again.'
+      : result.reason === 'size' ? 'This draft is too large for sign-in recovery. Keep this page open until you save.'
+      : !result.saved && result.reason !== 'empty'
+        ? 'Draft recovery is unavailable in this tab. Keep this page open until you save; these edits may be lost when you sign in again.'
+        : result.omitted.length
+          ? `These fields cannot be kept for sign-in recovery: ${result.omitted.map((key) => clientErrorLabel(key === 'jwks_text' ? 'jwks' : key)).join(', ')}. Re-enter them after returning. Their current values are unchanged.` : '');
+  };
+  const beginMutation = () => {
+    stopRecoveredObservation();
+    setDraftSettled(false);
+    const operation = { id: crypto.randomUUID(), priorUnknown: Boolean(draftState.current?.uncertain) };
+    draftDisabled.current = false;
+    draftState.current = { ...draftState.current, form: f, base: baseForm.current, externalJwksUri,
+      operationId: operation.id, priorUnknown: operation.priorUnknown, uncertain: true };
+    persistDraft();
+    return operation;
+  };
+  const settleMutation = (operation, success, uncertain = false) => {
+    settleClientDraft({ owner: subject, route: draftRoute, operationId: operation.id, success, uncertain });
+    if (draftState.current?.operationId !== operation.id) return;
+    if (success) {
+      draftDisabled.current = true;
+      draftState.current = null;
+    } else {
+      draftState.current = { ...draftState.current, operationId: null,
+        uncertain: Boolean(operation.priorUnknown || uncertain), priorUnknown: Boolean(operation.priorUnknown || uncertain) };
+    }
+  };
+  useEffect(() => {
+    const off = beforeAuthBounce(persistDraft);
+    window.addEventListener('pagehide', persistDraft);
+    return () => { off(); window.removeEventListener('pagehide', persistDraft); };
+  }, [subject, draftRoute]);
+
+  const load = ({ recover = true } = {}) => {
     const sequence = ++loadSequence.current;
     setLoadErr(null);
     setF(null);
@@ -108,28 +222,18 @@ function ClientEditForm({ id }) {
         }
         const jwksPath = c.jwks_uri ? decomposeUrl(c.jwks_uri, c.hostname) : null;
         setExternalJwksUri(c.jwks_uri && !jwksPath ? c.jwks_uri : null);
-        const form = {
-          client_id: c.client_id,
-          name: c.name,
-          hostname: c.hostname,
-          redirect_paths: c.redirect_paths.length ? c.redirect_paths : [''],
-          events_path: c.events_path ?? '',
-          key_mode: c.jwks_uri ? 'uri' : 'inline',
-          jwks_path: jwksPath ?? '',
-          // Show the registered public JWKS (it's public material) — an empty
-          // box here read as "no key configured".
-          jwks_text: c.jwks ? JSON.stringify(c.jwks, null, 2) : '',
-          allowed_scopes: c.allowed_scopes,
-          is_first_party: c.is_first_party,
-          entry_policy: c.entry_policy,
-        };
+        const form = clientFormFromRow(c);
+        baseForm.current = form;
+        const recovered = recover ? restore(form, Boolean(c.disabled_at)) : restoreClientDraft(null, form);
+        draftDisabled.current = false;
+        draftState.current = { form: recovered.form, base: form, externalJwksUri: c.jwks_uri && !jwksPath ? c.jwks_uri : null, uncertain: recovered.uncertain, priorUnknown: recovered.priorUnknown, operationId: null, restoredOperationId: recovered.restoredOperationId, omitted: recovered.omitted, createdAt: recovered.createdAt };
         setRow(c);
-        setF(form);
+        setF(recovered.form);
         setSnap(surface(form));
         setErrs({});
         setServerErrs({});
         setSaveErr(null);
-        setSaveUncertain(false);
+        setSaveUncertain(recovered.uncertain);
         setOutcomeOpen(false);
         setOutcomeErrors({});
         setTechnical('');
@@ -137,17 +241,35 @@ function ClientEditForm({ id }) {
       })
       .catch((e) => {
         if (!mounted.current || sequence !== loadSequence.current) return;
+        if (e.code === 'client_not_found') {
+          clearClientDraft(subject, draftRoute);
+          draftState.current = null;
+        }
         if (!['unauthenticated', 'step_up_required'].includes(e.code || e.message)) setLoadErr(e);
       });
   };
   useEffect(() => {
     if (!isNew) load();
-  }, [id]);
+    else {
+      const recovered = restore(emptyForm);
+      draftState.current = { form: recovered.form, base: emptyForm, uncertain: recovered.uncertain, priorUnknown: recovered.priorUnknown, operationId: null, restoredOperationId: recovered.restoredOperationId, omitted: recovered.omitted, createdAt: recovered.createdAt };
+      setF(recovered.form);
+      setSaveUncertain(recovered.uncertain);
+    }
+  }, [id, subject]);
 
   const set = (patch) => {
     const changed = changedClientFields(f, patch);
     if (Object.keys(changed).length === 0) return;
-    setF((cur) => ({ ...cur, ...changed }));
+    stopRecoveredObservation();
+    setDraftSettled(false);
+    const next = { ...f, ...changed };
+    draftDisabled.current = false;
+    draftState.current = { ...draftState.current, form: next, base: baseForm.current, externalJwksUri, operationId: null, uncertain: draftState.current?.uncertain ?? false, omitted: (draftState.current?.omitted ?? []).filter((key) => !Object.hasOwn(changed, key)) };
+    setDraftOmitted((keys) => keys.filter((key) => !Object.hasOwn(changed, key)));
+    persistDraft();
+    latestForm.current = next;
+    setF(next);
     setServerErrs((cur) => clearEditedServerErrors(cur, changed));
     if (Object.hasOwn(changed, 'client_id')) setExistingClientId(null);
     // The last outcome stays readable while individual field marks clear.
@@ -219,7 +341,7 @@ function ClientEditForm({ id }) {
   const missing = missingClientFields(f, { isNew, externalJwksUri, hasInlineJwks: row?.has_inline_jwks });
   const requiredOk = Boolean(f) && missing.length === 0;
   const dirty = f && surface(f) !== snap;
-  const canSave = !busy && feedback.state === 'idle' && !hasErrors && requiredOk && (isNew || dirty);
+  const canSave = !busy && feedback.state === 'idle' && !hasErrors && requiredOk && draftOmitted.length === 0 && !draftSettled && (isNew || dirty);
   const panelErrors = { ...outcomeErrors, ...activeClientErrors(errs, f?.key_mode) };
   const errorItems = Object.entries(panelErrors).filter(([, message]) => message);
   const errorMarks = Object.fromEntries(errorItems.flatMap(([key, message], index) =>
@@ -277,6 +399,8 @@ function ClientEditForm({ id }) {
   const save = async () => {
     if (!canSave || !feedback.begin()) return;
     ++loadSequence.current;
+    // A reload while a mutation is in flight must retain its ambiguous outcome.
+    const operation = beginMutation();
     setOutcomeKind('save');
     setOutcomeOpen(false);
     setOutcomeErrors({});
@@ -293,13 +417,18 @@ function ClientEditForm({ id }) {
         if (body.jwks_uri === undefined) body.jwks_uri = null;
         if (body.jwks === undefined) body.jwks = null;
         const created = await createClient(body);
+        settleMutation(operation, true);
         if (!mounted.current) return;
+        setDraftNotice(''); setDraftStorageNotice('');
         feedback.finish('success', () => {
           if (mounted.current) nav('/clients/' + encodeURIComponent(created.client.client_id), { replace: true });
         }, true);
       } else {
         await updateClient(id, buildBody());
+        settleMutation(operation, true);
         if (!mounted.current) return;
+        baseForm.current = f;
+        setDraftNotice(''); setDraftStorageNotice('');
         setSnap(surface(f));
         // Refresh server metadata without replacing the successful form with a skeleton.
         const sequence = ++loadSequence.current;
@@ -307,6 +436,16 @@ function ClientEditForm({ id }) {
           if (!mounted.current || sequence !== loadSequence.current) return;
           const current = data.clients.find((client) => client.client_id === id);
           if (current) {
+            const canonical = clientFormFromRow(current);
+            const rebased = rebaseClientDraftForm(latestForm.current ?? f, f, canonical);
+            baseForm.current = canonical;
+            latestForm.current = rebased;
+            setF(rebased);
+            setSnap(surface(canonical));
+            if (draftState.current) {
+              draftState.current = { ...draftState.current, form: rebased, base: canonical };
+              persistDraft();
+            }
             setRow(current);
             const path = current.jwks_uri ? decomposeUrl(current.jwks_uri, current.hostname) : null;
             setExternalJwksUri(current.jwks_uri && !path ? current.jwks_uri : null);
@@ -315,8 +454,10 @@ function ClientEditForm({ id }) {
         feedback.finish('success');
       }
     } catch (e) {
+      settleMutation(operation, false, Boolean(e.uncertain));
       if (!mounted.current) return;
       if (['unauthenticated', 'step_up_required'].includes(e.code || e.message)) { feedback.reset(); return; }
+      setSaveUncertain(Boolean(draftState.current?.uncertain));
       setTechnical(feedbackTechnical(e));
       setOutcomeOpen(true);
       setOutcomeErrors({});
@@ -336,7 +477,7 @@ function ClientEditForm({ id }) {
         setOutcomeErrors({ client_id: 'This client ID is already taken' });
         setSaveErr("Couldn't save. This client ID is already taken. Open its existing registration or choose another ID.");
       } else {
-        setSaveUncertain(Boolean(e.uncertain));
+        setSaveUncertain(Boolean(draftState.current?.uncertain));
         setSaveErr(e.uncertain
           ? `The save result could not be confirmed. ${apiErrorMessage(e)}`
           : `Couldn't save. ${apiErrorMessage(e)}`);
@@ -346,6 +487,7 @@ function ClientEditForm({ id }) {
 
   const lifecycle = async (action) => {
     if (busy || feedback.state !== 'idle') return;
+    const operation = beginMutation();
     setOutcomeKind('action');
     setBusy(true);
     setSaveErr(null);
@@ -359,20 +501,23 @@ function ClientEditForm({ id }) {
       if (action === 'enable') await enableClient(id);
       if (action === 'delete') {
         await deleteClient(id);
+        settleMutation(operation, true);
         if (!mounted.current) return;
         nav('/', { replace: true });
         return;
       }
+      settleMutation(operation, true);
       if (!mounted.current) return;
       setModal(null);
       await load();
     } catch (e) {
+      settleMutation(operation, false, Boolean(e.uncertain));
       if (!mounted.current) return;
       if (!['unauthenticated', 'step_up_required'].includes(e.code || e.message)) {
         setOutcomeOpen(true);
         setTechnical(feedbackTechnical(e));
         setAlertMessage(e.uncertain ? 'The action result could not be confirmed. Details follow the save button.' : 'Action failed. Details follow the save button.');
-        setSaveUncertain(Boolean(e.uncertain));
+        setSaveUncertain(Boolean(draftState.current?.uncertain));
         setSaveErr(e.uncertain
           ? `The action result could not be confirmed. ${apiErrorMessage(e)}`
           : `Action failed. ${apiErrorMessage(e)}`);
@@ -665,7 +810,7 @@ function ClientEditForm({ id }) {
             <SaveButton state={feedback.state} label={isNew ? 'Register client' : 'Save changes'}
               disabled={!canSave} onClick={save} describedBy={'rp-action-note' + (showOutcome ? ' rp-outcome-title' : '')} />
             <span className="rp-action-note" id="rp-action-note">
-              {missing.length > 0 ? `Required: ${missing.join(', ')}.`
+              {draftSettled ? 'Previous action confirmed. Check the registration before editing.' : draftOmitted.length > 0 ? 'Re-enter the omitted fields or discard this draft.' : missing.length > 0 ? `Required: ${missing.join(', ')}.`
                 : hasErrors ? 'Correct the marked fields before saving.'
                   : !isNew && !dirty ? 'No unsaved changes' : ''}
             </span>
@@ -686,6 +831,26 @@ function ClientEditForm({ id }) {
               </li>
             ))}</ol>}
           </OutcomePanel>
+      <div className="rp-draft-recovery" role="status" style={{ marginTop: 14 }}>
+        {draftNotice && <p>{draftNotice}</p>}
+        {draftOmitted.length > 0 && <p>Some fields could not be kept safely: {draftOmitted.map((key) => clientErrorLabel(key === 'jwks_text' ? 'jwks' : key)).join(', ')}. Re-enter these fields before saving; public keys and URL values must be reviewed.</p>}
+        {draftStorageNotice && <p>{draftStorageNotice}</p>}
+        {draftSettled && <p><Link to="/clients">Check the client list</Link>{!isNew && <> or <button className="btn" onClick={load}>Reload registration</button></>}</p>}
+        <button className="btn" disabled={formLocked || (!dirty && !draftNotice)} onClick={() => {
+          stopRecoveredObservation();
+          setDraftSettled(false);
+          const cleared = clearClientDraft(subject, draftRoute);
+          draftDisabled.current = true;
+          draftState.current = null;
+          setDraftNotice(''); setDraftStorageNotice(cleared ? '' : 'The saved draft could not be removed. Close this tab to discard its recovery data.'); setDraftOmitted([]);
+          setErrs({}); setServerErrs({}); setSaveErr(null); setSaveUncertain(false);
+          setOutcomeOpen(false); setOutcomeErrors({}); setTechnical(''); setAlertMessage('');
+          if (isNew) { setF(emptyForm); baseForm.current = emptyForm; setSnap(surface(emptyForm)); }
+          else load({ recover: false });
+        }}>Discard unsaved edits</button>
+      </div>
+
+
           <div className="rp-sr-only" role="status">{feedback.state === 'pending' ? (isNew ? 'Registering client…' : 'Saving changes…') : feedback.state === 'success' ? (isNew ? 'Client registered.' : 'Changes saved.') : ''}</div>
           <div className="rp-sr-only" role="alert">{feedback.state === 'pending' ? '' : alertMessage}</div>
       </div>

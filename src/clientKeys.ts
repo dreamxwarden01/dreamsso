@@ -1,4 +1,5 @@
-import { createLocalJWKSet, createRemoteJWKSet, errors, type JSONWebKeySet, type JWTVerifyGetKey } from 'jose';
+import { createLocalJWKSet, errors, type JSONWebKeySet, type JWTVerifyGetKey } from 'jose';
+import { fetchClientJwks } from './clientJwksTransport.js';
 
 export interface ClientKeyRegistration {
   client_id: string;
@@ -28,7 +29,7 @@ const SAFE_CODES = new Set([
   'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ERR_TLS_CERT_ALTNAME_INVALID',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED',
-  'ERR_JWKS_TIMEOUT', 'ERR_JWKS_INVALID', 'ERR_JWK_INVALID', 'ERR_JOSE_GENERIC',
+  'ERR_JWKS_TIMEOUT', 'ERR_JWKS_RESPONSE_TOO_LARGE', 'ERR_JWKS_INVALID', 'ERR_JWK_INVALID', 'ERR_JOSE_GENERIC',
 ]);
 /** Error messages and causes may contain URLs or credentials; emit only known codes. */
 export function safeKeyError(error: unknown): { code: string; reason: string } {
@@ -38,6 +39,7 @@ export function safeKeyError(error: unknown): { code: string; reason: string } {
   const reason = value.message === 'Expected 200 OK from the JSON Web Key Set HTTP response' ? 'jwks_http_non_200'
     : value.message === 'Failed to parse the JSON Web Key Set HTTP response as JSON' ? 'jwks_bad_json'
     : code === 'ERR_JWKS_TIMEOUT' ? 'jwks_timeout'
+    : code === 'ERR_JWKS_RESPONSE_TOO_LARGE' ? 'jwks_response_too_large'
     : code === 'ERR_JWKS_INVALID' || code === 'ERR_JWK_INVALID' ? 'invalid_key_material'
     : code ? 'key_transport_or_material_failure' : 'key_configuration_or_resolution_failure';
   return { code: code ?? 'UNKNOWN', reason };
@@ -61,14 +63,43 @@ function identityFields(client?: ClientKeyRegistration, context?: ClientKeyConte
   };
 }
 
-/** Shared transport policy; preserve existing registered URI behavior at runtime. */
+/** jose v5 has no custom-fetch hook. Keep its cache policy around the bounded
+ * transport while leaving key selection, import and cryptographic checks to jose.
+ * Failed refreshes never serve the saved registration snapshot or stale keys.
+ */
 function remoteSet(url: URL) {
-  return createRemoteJWKSet(url, {
-    timeoutDuration: 3000,
-    cacheMaxAge: 600_000,
-    cooldownDuration: 30_000,
-    headers: { Accept: 'application/json' },
+  let local: ReturnType<typeof createLocalJWKSet> | undefined;
+  let snapshot: JSONWebKeySet | undefined;
+  let fetchedAt: number | undefined;
+  let pending: Promise<void> | undefined;
+  const ageBelow = (ms: number) => fetchedAt !== undefined && Date.now() < fetchedAt + ms;
+  const reload = (): Promise<void> => {
+    if (!pending) {
+      pending = fetchClientJwks(url).then((document) => {
+        const next = createLocalJWKSet(document as JSONWebKeySet);
+        const nextSnapshot = structuredClone(document as JSONWebKeySet);
+        local = next;
+        snapshot = nextSnapshot;
+        fetchedAt = Date.now();
+      }).finally(() => { pending = undefined; });
+    }
+    return pending;
+  };
+  const resolve: JWTVerifyGetKey = async (header, token) => {
+    if (!local || !ageBelow(600_000)) await reload();
+    try { return await local!(header, token); }
+    catch (error) {
+      if (!(error instanceof errors.JWKSNoMatchingKey) || ageBelow(30_000)) throw error;
+      await reload();
+      return local!(header, token);
+    }
+  };
+  const result = Object.assign(resolve, { reload, jwks: () => snapshot ? structuredClone(snapshot) : undefined, fresh: false, coolingDown: false });
+  Object.defineProperties(result, {
+    fresh: { get: () => ageBelow(600_000) },
+    coolingDown: { get: () => ageBelow(30_000) },
   });
+  return result;
 }
 
 export class ClientKeyResolver {

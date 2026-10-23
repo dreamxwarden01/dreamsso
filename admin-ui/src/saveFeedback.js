@@ -64,9 +64,9 @@ export function feedbackTechnical(error) {
 const keyCodes = new Set(['EACCES', 'EPERM', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET',
   'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ERR_TLS_CERT_ALTNAME_INVALID',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'DEPTH_ZERO_SELF_SIGNED_CERT',
-  'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED', 'ERR_JWKS_TIMEOUT', 'ERR_JWKS_INVALID',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED', 'ERR_JWKS_TIMEOUT', 'ERR_JWKS_RESPONSE_TOO_LARGE', 'ERR_JWKS_INVALID',
   'ERR_JWK_INVALID', 'ERR_JOSE_GENERIC', 'UNKNOWN']);
-const keyReasons = new Set(['jwks_http_non_200', 'jwks_bad_json', 'jwks_timeout', 'invalid_key_material',
+const keyReasons = new Set(['jwks_http_non_200', 'jwks_bad_json', 'jwks_timeout', 'jwks_response_too_large', 'invalid_key_material',
   'key_transport_or_material_failure', 'key_configuration_or_resolution_failure']);
 export function keyFieldFeedback(key, message) {
   if (!['jwks', 'jwks_uri', 'jwks_path'].includes(key) || typeof message !== 'string') return { message };
@@ -78,6 +78,7 @@ export function keyFieldFeedback(key, message) {
   else if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') human = 'The app hostname could not be resolved. Check the hostname and DNS, then try again.';
   else if (code === 'ETIMEDOUT' || code === 'ERR_JWKS_TIMEOUT' || reason === 'jwks_timeout') human = 'The public key request timed out. Check that the app and its key URL are reachable, then try again.';
   else if (reason === 'jwks_http_non_200') human = 'The public key URL did not return HTTP 200. Check the URL and app response, then try again.';
+  else if (reason === 'jwks_response_too_large') human = 'The public key response is too large. Serve only the public JWKS document at this URL, then try again.';
   else if (reason === 'jwks_bad_json') human = 'The public key URL did not return valid JSON. Check that it serves a public JWKS document, then try again.';
   else if (reason === 'invalid_key_material') human = 'The public keys are invalid or empty. Provide a JWKS document containing public signing keys, then try again.';
   else if (['ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',

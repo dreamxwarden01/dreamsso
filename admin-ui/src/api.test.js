@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getMe, listClients, createClient, updateClient, apiErrorMessage } from './api.js';
+import { getMe, listClients, createClient, updateClient, apiErrorMessage, beforeAuthBounce } from './api.js';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -20,7 +20,7 @@ test('valid create uses canonical server ID and sends the synchronizer token', a
   const calls = [];
   fixture(t, async (url, opts) => {
     calls.push({ url, opts });
-    return url.endsWith('/me') ? json({ csrf: 'synthetic-csrf' }) : json({ client: { client_id: 'canonical-id' } }, 201);
+    return url.endsWith('/me') ? json({ csrf: 'synthetic-csrf', sub: 'synthetic-sub' }) : json({ client: { client_id: 'canonical-id' } }, 201);
   });
   await getMe();
   assert.equal((await createClient({ client_id: 'INPUT' })).client.client_id, 'canonical-id');
@@ -119,4 +119,28 @@ test('unknown safe error codes stay diagnosable without reflecting arbitrary ser
   assert.match(apiErrorMessage({ code: 'key_not_ready', status: 422 }), /key_not_ready/);
   assert.doesNotMatch(apiErrorMessage({ code: 'https://example.invalid/?token=secret', status: 422 }), /token=secret/);
   assert.match(apiErrorMessage({ code: 'request_timeout', uncertain: true }), /timed out.*may already/);
+});
+
+test('RP recovery listeners run synchronously before auth navigation and failures cannot block it', async (t) => {
+  fixture(t, async () => json({ error: 'unauthenticated' }, 401));
+  const seen = [], contexts = [];
+  const off = beforeAuthBounce((context) => { seen.push(location.href); contexts.push(context); });
+  const fail = beforeAuthBounce(() => { throw new Error('storage unavailable'); });
+  t.after(() => { off(); fail(); });
+  await assert.rejects(createClient({}), (e) => e.code === 'unauthenticated');
+  assert.deepEqual(seen, ['']);
+  assert.deepEqual(contexts[0], { reason: 'unauthenticated', mutating: true, path: '/clients' });
+  assert.match(location.href, /start-login/);
+  location.href = '';
+  t.mock.method(globalThis, 'fetch', async () => json({ error: 'step_up_required' }, 403));
+  await assert.rejects(createClient({}), (e) => e.code === 'step_up_required');
+  assert.equal(seen.length, 2);
+  assert.deepEqual(contexts[1], { reason: 'step_up_required', mutating: true, path: '/clients' });
+  assert.equal(location.reload.mock.callCount(), 1);
+  off(); fail();
+});
+
+test('me requires stable authenticated subject before RP restoration is possible', async (t) => {
+  fixture(t, async () => json({ csrf: 'synthetic' }));
+  await assert.rejects(getMe(), (e) => e.code === 'invalid_response');
 });
