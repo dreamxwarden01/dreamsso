@@ -1,3 +1,6 @@
+import { AUTH_SHELL_CSS, AUTH_BACKGROUND } from './authPresentation.js';
+import { renderAuthMotionScript } from './authMotion.js';
+
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -22,9 +25,8 @@ const SHIELD_X = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" ar
 // Shared styles — the account console's design tokens (system font, #f0f2f5 bg,
 // #fff card, #1a73e8 primary), so the SSO's server-rendered pages and the SPA feel
 // like one product. Nonce'd to satisfy the strict CSP (style-src 'nonce-…').
-// Soft "bloom" background for the auth pages, served at /auth-bg.svg (same-origin,
-// so it satisfies the strict img-src 'self' CSP). Displayed at natural size and
-// centered (background-size:auto) so resizing CROPS it rather than zooming/stretching.
+// Legacy background endpoint retained for previously cached auth documents.
+// Current pages use the shared, self-contained CSS bloom in authPresentation.
 export const AUTH_BG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1600" viewBox="0 0 2560 1600">
 <defs>
 <linearGradient id="base" x1="0" y1="0" x2="1" y2="1">
@@ -52,21 +54,7 @@ export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 
 function baseStyle(nonce: string): string {
   return `<link rel="icon" type="image/svg+xml" href="/favicon.svg"><style nonce="${nonce}">
-  *{box-sizing:border-box}
-  html,body{margin:0}
-  /* Cross-document view transitions: the browser morphs the card between the
-     server-rendered auth steps (no JS). Graceful no-op where unsupported. */
-  @view-transition{navigation:auto}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;
-    background:#f1f0f7 url(/auth-bg.svg) center / auto no-repeat fixed;
-    color:#1f2937;font-size:14px;line-height:1.5;min-height:100vh;
-    display:flex;align-items:center;justify-content:center;padding:24px}
-  .wrap{width:100%;max-width:400px}
-  .card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;
-    box-shadow:0 4px 24px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);padding:36px 34px;
-    view-transition-name:authcard}
-  .overlay .card{view-transition-name:none}
-  ::view-transition-group(authcard){animation-duration:.4s}
+${AUTH_SHELL_CSS}
   .brand{display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:18px}
   .badge{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
     background:linear-gradient(135deg,#1a73e8,#1557b0);box-shadow:0 2px 8px rgba(26,115,232,.35);flex-shrink:0}
@@ -88,14 +76,15 @@ function baseStyle(nonce: string): string {
     padding:18px 24px;text-align:center;font-size:14px;color:#5f6368}
   .cta a{color:#1f2937;font-weight:700;text-decoration:none}
   .cta a:hover{text-decoration:underline}
-  input{width:100%;padding:10px 13px;border:1px solid #d1d5db;border-radius:10px;font-size:14px;color:#1f2937;
-    outline:none;transition:border-color .15s,box-shadow .15s}
+  input{width:100%;padding:10px 13px;border:1px solid #d1d5db;border-radius:10px;font:inherit;font-size:16px;line-height:1.25;color:#1f2937;
+    outline:2px solid transparent;transition:border-color .15s,box-shadow .15s}
   input::placeholder{color:#9ca3af}
   input:focus{border-color:#1a73e8;box-shadow:0 0 0 3px rgba(26,115,232,.12)}
   .btn{width:100%;padding:11px 16px;border:none;border-radius:10px;background:#1a73e8;color:#fff;
     font-size:14px;font-weight:600;cursor:pointer;transition:background .15s;margin-top:6px;
     box-shadow:0 1px 2px rgba(26,115,232,.4)}
   .btn:hover{background:#1557b0}
+  .btn:focus-visible,.alt:focus-visible,.fgt:focus-visible,.cta a:focus-visible{outline:2px solid #1a73e8;outline-offset:2px}
   a.btn{display:flex;align-items:center;justify-content:center;text-decoration:none;box-sizing:border-box;margin-top:18px}
   .field-err{display:none;color:#b91c1c;font-size:12px;margin-top:6px}
   .grp.bad .field-err{display:block}
@@ -106,7 +95,7 @@ function baseStyle(nonce: string): string {
     max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chip-av{width:20px;height:20px;border-radius:50%;flex-shrink:0;margin-left:-6px}
   .otp{display:flex;gap:8px;justify-content:center;margin-bottom:18px}
-  .otp input{width:42px;height:50px;padding:0;text-align:center;font-size:21px;font-weight:600;border-radius:9px}
+  .otp input{flex:1 1 0;min-width:0;max-width:44px;height:50px;padding:0;text-align:center;font-size:21px;font-weight:600;border-radius:9px}
   .btn:disabled{opacity:.5;cursor:default}
   .or{display:flex;align-items:center;gap:10px;margin:16px 0;color:#9ca3af;font-size:12px}
   .or:before,.or:after{content:'';flex:1;height:1px;background:#e5e7eb}
@@ -167,8 +156,9 @@ export function renderLoginPage(opts: {
 <title>Sign in · ${esc(appName || siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     <h1>Welcome</h1>
     <p class="sub">${sub}</p>
@@ -200,12 +190,13 @@ ${baseStyle(nonce)}</head>
       <input type="hidden" name="csrf" value="${esc(csrf)}">
       <input type="hidden" name="credential" value="">
     </form>` : ''}
-  </div>
+  </div></div>
   ${registerUrl ? `<div class="cta">Don&rsquo;t have an account? <a href="${esc(registerUrl)}">Sign up</a></div>` : ''}
   ${foot(siteName)}
 </div>
 ${loginScript(nonce)}
 ${passkeyOptions ? webauthnGlue(nonce, passkeyOptions, 'first') : ''}
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -229,8 +220,9 @@ export function renderPasskeyLoginPage(opts: {
 <title>Sign in with a passkey · ${esc(appName || siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     <h1>Verify it’s you</h1>
     <p class="sub">Your device will ask for your fingerprint, face, or PIN</p>
@@ -243,10 +235,11 @@ ${baseStyle(nonce)}</head>
       <input type="hidden" name="csrf" value="${esc(csrf)}">
       <input type="hidden" name="credential" value="">
     </form>
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
 ${webauthnGlue(nonce, passkeyOptions, 'challenge')}
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -455,8 +448,9 @@ export function renderChallengePage(opts: {
 <title>Verify it's you · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     ${chipHtml(userLabel, opts.avatar)}
     <h1>${title}</h1>
@@ -465,7 +459,7 @@ ${baseStyle(nonce)}</head>
     ${body}
     ${tryAnother}
     ${cancelUrl ? `<a class="btn btn-ghost btn-gap" href="${esc(cancelUrl)}">Cancel</a>` : ''}
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
 ${method === 'totp' || (method === 'email' && emailSent) ? challengeScript(nonce) : ''}
@@ -473,6 +467,7 @@ ${method === 'email' ? sendGuardScript(nonce) : ''}
 ${method === 'email' && emailSent && resendIn ? resendCountdownScript(nonce) : ''}
 ${method === 'passkey' && passkeyOptions ? webauthnGlue(nonce, passkeyOptions, 'challenge', !error) : ''}
 ${method === 'passkey' && error ? `<script nonce="${nonce}">(function(){function s(i,on){var e=document.getElementById(i);if(e)e.hidden=!on;}var el=document.getElementById('pk-err');if(el){el.hidden=false;el.textContent=${JSON.stringify(error)};}s('pk-again',true);s('pk-alt',true);s('pk-wait',false);})();</script>` : ''}
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -580,8 +575,9 @@ export function renderKmsiPage(opts: {
 <title>Stay signed in? · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     ${chipHtml(userLabel, opts.avatar)}
     <h1>Stay signed in?</h1>
@@ -593,9 +589,10 @@ ${baseStyle(nonce)}</head>
       <button type="submit" class="btn" name="choice" value="yes">Yes</button>
       <button type="submit" class="btn btn-ghost btn-gap" name="choice" value="no">No</button>
     </form>
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -619,16 +616,18 @@ export function renderErrorPage(
 <title>${esc(opts.title)} · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     <h1>${esc(opts.title)}</h1>
     <p class="msg">${esc(opts.message)}</p>
     ${opts.code ? `<p class="errcode">[${esc(opts.code)}]</p>` : ''}
     ${opts.action ? `<a class="btn" href="${esc(opts.action.href)}">${esc(opts.action.label)}</a>` : ''}
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -642,13 +641,15 @@ export function render404Page(nonce: string, siteName = 'DreamSSO'): string {
 <title>Page not found · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <h1>Page not found</h1>
     <p class="sub">The page you&rsquo;re looking for doesn&rsquo;t exist or has moved.</p>
     <p class="errcode">[404]</p>
-  </div>
+  </div></div>
 </div>
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -667,17 +668,19 @@ export function renderStepupEnrollPage(
 <title>Verify your identity · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     <div class="state-ico" style="background:#fef3e2">${SHIELD_X}</div>
     <h1>You need a way to verify</h1>
     <p class="msg">${esc(appName)} requires a passkey or authenticator app. Add one in your account security, then come back.</p>
     <a class="btn" href="${esc(securityUrl)}" target="_blank" rel="noopener">Open account security</a>
     <a class="btn btn-ghost btn-gap" href="${esc(cancelUrl)}">Cancel</a>
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
@@ -689,34 +692,38 @@ export function renderSignedOutPage(nonce: string, siteName = 'DreamSSO'): strin
 <title>Signed out · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="done-badge">${CHECK}</div>
     <h1>Signed out</h1>
     <p class="msg">You've been signed out of ${esc(siteName)} and the apps you were using on this device.</p>
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }
 
 // Neutral "service unavailable" page — served pre-setup for every public route (and
 // for /setup without a valid token) so the first-run takeover surface is never
 // advertised. No config hint, no CTA; styled like the rest of the SSO (gets the
-// bloom via /auth-bg.svg).
+// shared CSS bloom).
 export function renderUnavailablePage(nonce: string, siteName = 'DreamSSO'): string {
   return `<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Service unavailable · ${esc(siteName)}</title>
 ${baseStyle(nonce)}</head>
 <body>
+${AUTH_BACKGROUND}
 <div class="wrap">
-  <div class="card">
+  <div class="card"><div class="cb">
     <div class="brand"><span class="badge">${SHIELD}</span><span class="wordmark">${esc(siteName)}</span></div>
     <h1>Service unavailable</h1>
     <p class="msg">This service is temporarily unavailable. Please try again in a little while.</p>
-  </div>
+  </div></div>
   ${foot(siteName)}
 </div>
+${renderAuthMotionScript(nonce)}
 </body></html>`;
 }

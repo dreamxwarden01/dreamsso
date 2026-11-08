@@ -39,6 +39,7 @@ jobs:
       - run: npm run test:events
       - run: npm run test:admin
       - run: npm run test:shutdown
+      - run: npm run test:auth-ui
       - run: npm run test:jwks
       - run: npm run test:keys
       - run: npm run test:keys:linux
