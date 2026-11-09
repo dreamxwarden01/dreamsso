@@ -1,5 +1,6 @@
 import { AUTH_SHELL_CSS, AUTH_BACKGROUND } from './authPresentation.js';
 import { renderAuthMotionScript } from './authMotion.js';
+import { renderAuthNativeMotionScript } from './authNativeMotion.js';
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
@@ -55,6 +56,7 @@ export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 function baseStyle(nonce: string): string {
   return `<link rel="icon" type="image/svg+xml" href="/favicon.svg"><style nonce="${nonce}">
 ${AUTH_SHELL_CSS}
+  ::view-transition-group(authcard){transform-origin:0 0}
   .brand{display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:18px}
   .badge{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
     background:linear-gradient(135deg,#1a73e8,#1557b0);box-shadow:0 2px 8px rgba(26,115,232,.35);flex-shrink:0}
@@ -118,7 +120,7 @@ ${AUTH_SHELL_CSS}
   .done-badge{width:54px;height:54px;border-radius:50%;background:#d1fae5;display:flex;align-items:center;
     justify-content:center;margin:0 auto 18px}
   .msg{text-align:center;color:#6b7280;font-size:14px;line-height:1.55;margin:0}
-</style>`;
+</style>${renderAuthNativeMotionScript(nonce)}`;
 }
 
 const foot = (siteName: string) => `<div class="foot">

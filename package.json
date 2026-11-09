@@ -17,7 +17,7 @@
     "test:keys:linux": "tsc -p account/server/tsconfig.json && node --test tests/account-key-linux.mjs && npm run test:keys:linux:source",
     "test:keys:linux:source": "ACCOUNT_KEY_SOURCE=1 node --import tsx --test tests/account-key-linux.mjs",
     "test:shutdown": "node --import tsx --test tests/service-lifecycle.test.ts",
-    "test:auth-ui": "node --import tsx --test tests/auth-motion.test.ts tests/auth-pages.test.ts"
+    "test:auth-ui": "node --import tsx --test tests/auth-motion.test.ts tests/auth-pages.test.ts tests/auth-native-motion.test.ts"
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",
