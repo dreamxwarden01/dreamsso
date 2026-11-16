@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
 import ts from 'typescript';
 import { isTrustedMutation } from '../account/server/src/request-source.js';
 
@@ -9,13 +10,13 @@ import { isTrustedMutation } from '../account/server/src/request-source.js';
 // No application config, Redis connection, secrets, HTTP listener or SSO is loaded.
 function loadApi(overrides: Record<string, unknown> = {}) {
   const routes: { method: string; path: string; handlers: Function[] }[] = [];
-  let updates = 0, reads = 0;
+  let updates = 0, reads = 0, destroys = 0;
   const session = { sub: 'fixture', ssoSid: 'master', claims: {}, accessToken: 'fixture', idToken: 'fixture',
     accessExpiresAt: Math.floor(Date.now() / 1000) + 900, amr: [], createdAt: 1 };
   const dependencies: Record<string, unknown> = {
     express: { Router: () => Object.fromEntries(['get', 'post', 'patch', 'delete', 'use'].map(method =>
       [method, (path: string, ...handlers: Function[]) => routes.push({ method, path, handlers })])), raw: () => (_req: unknown, _res: unknown, next: Function) => next() },
-    '../session.js': { getSession: async () => { reads++; return session; }, updateSession: async () => { updates++; return true; } },
+    '../session.js': { getSession: async () => { reads++; return session; }, updateSession: async () => { updates++; return true; }, destroySession: async () => { destroys++; } },
     '../config.js': { config: { internal: 'https://sso.invalid', publicUrl: 'https://account.example', redirectUri: '' } },
     '../oidc.js': { s2sAssertion: async () => 'synthetic' },
     '../s2sFetch.js': { s2sFetch: async () => { throw Error('unexpected upstream call'); } },
@@ -24,7 +25,7 @@ function loadApi(overrides: Record<string, unknown> = {}) {
   const source = fs.readFileSync(new URL('../account/server/src/routes/api.ts', import.meta.url), 'utf8');
   const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(output, { exports: {}, require: (id: string) => { assert.ok(id in dependencies, id); return dependencies[id]; }, Buffer, Uint8Array, AbortSignal, Date, console });
-  return { routes, session, updates: () => updates, reads: () => reads };
+  return { routes, session, updates: () => updates, reads: () => reads, destroys: () => destroys };
 }
 
 function request(method = 'POST', headers: Record<string, string> = { origin: 'https://account.example' }) {
@@ -166,4 +167,149 @@ test('the existing SPA client redirects only for 401 and preserves permission/st
   assert.deepEqual(stepups, ['POST']);
   error = 'permission_denied'; await assert.rejects(client.orgApi('PATCH', '/users/fixture', {}), /permission_denied/);
   assert.equal(permissionChecks, 1); assert.equal(location.href, '');
+});
+
+test('/api/me propagates explicit SSO JSON denials without cached permissions or a session write', async () => {
+  for (const [status, error] of [[401, 'invalid_token'], [403, 'access_denied'], [403, 'client_not_allowed'], [403, 'insufficient_scope']] as const) {
+    const api = loadApi({ '../s2sFetch.js': { s2sFetch: async (url: string) => {
+      assert.equal(url, 'https://sso.invalid/account/permissions');
+      return Response.json({ error, permissions: ['untrusted-extra-field'] }, { status });
+    } } });
+    (api.session as any).permissions = ['cached-admin'];
+    const res = await run(api.routes.find(r => r.path === '/api/me')!.handlers, request('GET', {}));
+    assert.equal(res.statusCode, status); assert.equal(res.body.error, error); assert.equal(Object.keys(res.body).length, 1);
+    assert.equal(res.body.profile, undefined); assert.equal(res.body.permissions, undefined);
+    assert.equal(api.updates(), 0); assert.deepEqual((api.session as any).permissions, ['cached-admin']);
+  }
+});
+
+test('/api/me keeps only its existing cache on unavailable or non-authoritative permission responses without extending its lease', async () => {
+  const cases = [
+    () => new Response('<html>edge challenge</html>', { status: 403, headers: { 'content-type': 'text/html' } }),
+    () => new Response('<html>proxy error</html>', { status: 502, headers: { 'content-type': 'text/html' } }),
+    () => Response.json({ error: 'authentication_unavailable' }, { status: 503 }),
+    () => Response.json({ error: 'access_denied' }, { status: 503 }),
+    () => Response.json({ error: 'access_denied' }, { status: 403, headers: { 'cf-mitigated': 'challenge' } }),
+    () => new Response('{invalid', { status: 403, headers: { 'content-type': 'application/json' } }),
+    () => Response.json({ error: 'unknown_edge_error' }, { status: 403 }),
+    () => Response.json({ permissions: ['new-grant', 1] }),
+    () => { throw new Error('synthetic_transport_failure'); },
+  ];
+  for (const response of cases) {
+    const api = loadApi({ '../s2sFetch.js': { s2sFetch: async () => response() } });
+    (api.session as any).permissions = ['cached-read'];
+    const res = await run(api.routes.find(r => r.path === '/api/me')!.handlers, request('GET', {}));
+    assert.equal(res.statusCode, 200); assert.deepEqual(res.body.permissions, ['cached-read']);
+    assert.equal(api.updates(), 0, 'unavailability must not refresh the session expiry or cached lease');
+  }
+});
+
+test('/api/me accepts a current empty permission set as revocation of cached grants', async () => {
+  const api = loadApi({ '../s2sFetch.js': { s2sFetch: async () => Response.json({ permissions: [] }) } });
+  (api.session as any).permissions = ['cached-admin'];
+  const res = await run(api.routes.find(r => r.path === '/api/me')!.handlers, request('GET', {}));
+  assert.equal(res.statusCode, 200); assert.equal(res.body.permissions.length, 0); assert.equal(api.updates(), 1);
+});
+
+function actualSessionReader(raw: string | null, fail: 'session' | 'marker' | 'none' = 'marker', marker: string | null = null) {
+  let reads = 0;
+  const source = fs.readFileSync(new URL('../account/server/src/session.ts', import.meta.url), 'utf8');
+  const output = ts.transpileModule(source, { compilerOptions: { esModuleInterop: true, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const dependencies: Record<string, unknown> = {
+    'node:crypto': crypto,
+    './config.js': { config: { sessionTtl: 60 } },
+    './redis.js': { redis: { get: async (key: string) => {
+      reads++;
+      if (key.startsWith('acct:sess:')) {
+        if (fail === 'session') throw new Error('synthetic_private_redis_diagnostic');
+        return raw;
+      }
+      assert.ok(key.startsWith('acct:ssorevoked:'));
+      if (fail === 'marker') throw new Error('synthetic_private_redis_diagnostic');
+      return marker;
+    }, eval: async () => { throw new Error('synthetic_cleanup_failure'); } } },
+  };
+  const exported: any = {};
+  vm.runInNewContext(output, { exports: exported, require: (id: string) => { assert.ok(Object.hasOwn(dependencies, id), id); return dependencies[id]; } });
+  return { ...exported, reads: () => reads };
+}
+
+test('actual Account session reads distinguish marker-store uncertainty from malformed or revoked records', async () => {
+  const data = { sub: crypto.randomUUID(), ssoSid: crypto.randomUUID(), claims: {}, accessToken: 'synthetic', idToken: 'synthetic',
+    accessExpiresAt: Math.floor(Date.now() / 1000) + 900, amr: [], createdAt: 1 };
+  for (const failure of ['session', 'marker'] as const) {
+    const reader = actualSessionReader(JSON.stringify(data), failure);
+    await assert.rejects(reader.getSession('fixture'), (error: any) => {
+      assert.ok(error instanceof reader.SessionStateUnavailable);
+      assert.equal(error.name, 'SessionStateUnavailable');
+      assert.equal(error.message, 'Session state unavailable.');
+      return true;
+    });
+  }
+  for (const raw of [null, 'invalid-json', 'null', '"scalar"', '[]', JSON.stringify({ ...data, ssoSid: 'invalid' })]) {
+    const reader = actualSessionReader(raw, 'marker');
+    assert.equal(await reader.getSession('fixture'), null);
+    assert.equal(reader.reads(), 1, 'malformed/absent records never query a marker');
+  }
+  const revoked = actualSessionReader(JSON.stringify(data), 'none', data.sub);
+  assert.equal(await revoked.getSession('fixture'), null, 'known denial stays denial despite cleanup failure');
+});
+
+test('/api/me returns 503 without profile or redirect when the actual revocation-marker read is unavailable', async () => {
+  const reader = actualSessionReader(JSON.stringify({ sub: crypto.randomUUID(), ssoSid: crypto.randomUUID(), claims: {},
+    accessToken: 'synthetic', idToken: 'synthetic', accessExpiresAt: Math.floor(Date.now() / 1000) + 900, amr: [], createdAt: 1 }));
+  let upstreamCalls = 0, writes = 0;
+  const api = loadApi({ '../session.js': { getSession: reader.getSession, updateSession: async () => { writes++; return true; } },
+    '../s2sFetch.js': { s2sFetch: async () => { upstreamCalls++; throw Error('unexpected upstream'); } } });
+  const res = await run(api.routes.find(r => r.path === '/api/me')!.handlers, request('GET', {}));
+  assert.equal(res.statusCode, 503); assert.equal(res.body.error, 'session_unavailable');
+  assert.equal(res.body.profile, undefined); assert.equal(res.body.permissions, undefined);
+  assert.equal(writes, 0); assert.equal(upstreamCalls, 0);
+});
+
+test('known renewal denials stop expired and near-expiry requests before any handler and destroy only the local record', async () => {
+  for (const error of ['session_gone', 'invalid_client']) for (const remaining of [-1, 20]) for (const [method, path] of [['GET', '/api/me'], ['PATCH', '/api/profile'], ['GET', '/api/security']]) {
+    let upstream = 0;
+    const api = loadApi({ '../s2sFetch.js': { s2sFetch: async (url: string) => {
+      upstream++; assert.equal(url, 'https://sso.invalid/internal/token/renew');
+      return Response.json({ error }, { status: 401 });
+    } } });
+    (api.session as any).permissions = ['cached-admin']; api.session.accessExpiresAt = Math.floor(Date.now() / 1000) + remaining;
+    const res = await run(api.routes.find(r => r.path === path)!.handlers, request(method));
+    assert.equal(res.statusCode, 401); assert.equal(res.body.error, error);
+    assert.equal(res.body.profile, undefined); assert.equal(res.body.permissions, undefined);
+    assert.equal(api.destroys(), 1); assert.equal(api.updates(), 0); assert.equal(upstream, 1);
+  }
+});
+
+test('renewal uncertainty and non-authoritative 403 responses preserve existing soft behavior without destroying or extending local state', async () => {
+  const cases = [
+    () => new Response('<html>challenge</html>', { status: 401, headers: { 'content-type': 'text/html' } }),
+    () => Response.json({ error: 'session_gone' }, { status: 401, headers: { 'cf-mitigated': 'challenge' } }),
+    () => Response.json({ error: 'invalid_client' }, { status: 503 }),
+    () => Response.json({ error: 'access_denied' }, { status: 403 }),
+    () => Response.json({ error: 'unknown_edge_error' }, { status: 401 }),
+    () => new Response('invalid-json', { status: 401, headers: { 'content-type': 'application/json' } }),
+    () => { throw new Error('synthetic_transport_failure'); },
+  ];
+  for (const reply of cases) for (const remaining of [-1, 20]) {
+    const api = loadApi({ '../s2sFetch.js': { s2sFetch: async (url: string) => url.endsWith('/internal/token/renew') ? reply()
+      : Response.json({ error: 'authentication_unavailable' }, { status: 503 }) } });
+    (api.session as any).permissions = ['cached-read']; api.session.accessExpiresAt = Math.floor(Date.now() / 1000) + remaining;
+    const res = await run(api.routes.find(r => r.path === '/api/me')!.handlers, request('GET', {}));
+    assert.equal(res.statusCode, 200); assert.deepEqual(res.body.permissions, ['cached-read']);
+    assert.equal(api.destroys(), 0); assert.equal(api.updates(), 0);
+  }
+});
+
+test('failed local destruction after a known renewal denial returns503 without profile or further calls', async () => {
+  let upstream = 0, writes = 0, destroys = 0;
+  const api = loadApi({ '../session.js': { getSession: async () => api.session,
+    updateSession: async () => { writes++; return true; }, destroySession: async () => { destroys++; throw Error('synthetic_store_failure'); } },
+    '../s2sFetch.js': { s2sFetch: async () => { upstream++; return Response.json({ error: 'session_gone' }, { status: 401 }); } } });
+  api.session.accessExpiresAt = 0; (api.session as any).permissions = ['cached-admin'];
+  const res = await run(api.routes.find(r => r.path === '/api/me')!.handlers, request('GET', {}));
+  assert.equal(res.statusCode, 503); assert.equal(res.body.error, 'session_unavailable');
+  assert.equal(res.body.profile, undefined); assert.equal(res.body.permissions, undefined);
+  assert.equal(upstream, 1); assert.equal(writes, 0); assert.equal(destroys, 1);
 });

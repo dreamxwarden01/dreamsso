@@ -71,10 +71,11 @@ export function authorizeUrl(p: {
 // private_key_jwt material as /token, carried in the JSON body. The SSO
 // verifies it against this client's registered key and pins iss/sub to the
 // account portal's client_id.
-export async function s2sAssertion(): Promise<string> {
+export async function s2sAssertion(path: string): Promise<string> {
+  if (!/^\/[A-Za-z0-9_/-]+$/.test(path) || path.includes('//')) throw new Error('invalid_assertion_path');
   const {kid,key} = await clientKey();
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({})
+  return new SignJWT({ method: 'POST', path })
     .setProtectedHeader({ alg: 'EdDSA', kid })
     .setIssuer(config.clientId)
     .setSubject(config.clientId)
@@ -95,17 +96,7 @@ export interface TokenResponse {
 
 // Authorization-code -> tokens, authenticating with private_key_jwt.
 export async function exchangeCode(code: string, verifier: string): Promise<TokenResponse> {
-  const {kid,key} = await clientKey(); // selected key and kid stay paired through concurrent activation
-  const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
-    .setProtectedHeader({ alg: 'EdDSA', kid })
-    .setIssuer(config.clientId)
-    .setSubject(config.clientId)
-    .setAudience(config.issuer)
-    .setIssuedAt(now)
-    .setExpirationTime(now + 60)
-    .setJti(crypto.randomUUID())
-    .sign(key);
+  const assertion = await s2sAssertion('/token');
 
   const r = await s2sFetch(config.internal + '/token', {
     method: 'POST',

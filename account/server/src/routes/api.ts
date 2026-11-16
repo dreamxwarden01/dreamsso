@@ -3,7 +3,7 @@
 //   GET   /api/me       -> current identity + security summary
 //   PATCH /api/profile  -> edit display_name / email (proxied to the SSO, Bearer access token)
 import { Router, raw, type Request, type Response, type NextFunction } from 'express';
-import { getSession, updateSession, type SessionData } from '../session.js';
+import { getSession, updateSession, destroySession, type SessionData } from '../session.js';
 import { config } from '../config.js';
 import { s2sAssertion } from '../oidc.js';
 import { s2sFetch } from '../s2sFetch.js';
@@ -51,45 +51,62 @@ apiRouter.get('/api/settings/public', async (_req, res) => {
 
 // Access tokens live 15 minutes; renew them in place against the SSO's
 // session-bound /internal/token/renew (client assertion + the master-session
-// sid) instead of 401-bouncing the SPA every expiry. Fails soft: a dead SSO
-// session (logout, termination, window lapse) leaves the token expired and
-// the downstream token_expired checks surface the 401 as before.
+// sid) instead of 401-bouncing the SPA every expiry. Unavailability stays soft;
+// an explicit application denial ends this local record before any handler runs.
 const RENEW_SKEW_S = 30;
-async function renewAccessToken(s: SessionData): Promise<boolean> {
-  if (!s.ssoSid) return false;
+type RenewalResult = { kind: 'renewed' } | { kind: 'denied'; error: 'session_gone' | 'invalid_client' } | { kind: 'unavailable' };
+async function renewAccessToken(s: SessionData): Promise<RenewalResult> {
+  if (!s.ssoSid) return { kind: 'unavailable' };
   try {
     const r = await s2sFetch(config.internal + '/internal/token/renew', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-        client_assertion: await s2sAssertion(),
+        client_assertion: await s2sAssertion('/internal/token/renew'),
         sid: s.ssoSid,
         sub: s.sub,
       }),
       signal: AbortSignal.timeout(5000),
     });
-    if (!r.ok) return false;
-    const d = (await r.json().catch(() => null)) as { access_token?: string; expires_in?: number } | null;
-    if (!d?.access_token) return false;
+    if (r.redirected || r.headers.get('cf-mitigated')?.trim().toLowerCase() === 'challenge'
+      || !/^application\/json(?:\s*;|$)/i.test(r.headers.get('content-type') ?? '')) {
+      await r.body?.cancel().catch(() => {});
+      return { kind: 'unavailable' };
+    }
+    const d = (await r.json().catch(() => null)) as { access_token?: string; expires_in?: number; error?: unknown } | null;
+    if (r.status === 401 && (d?.error === 'session_gone' || d?.error === 'invalid_client')) {
+      return { kind: 'denied', error: d.error };
+    }
+    if (!r.ok || typeof d?.access_token !== 'string' || !d.access_token) return { kind: 'unavailable' };
     s.accessToken = d.access_token;
     s.accessExpiresAt = Math.floor(Date.now() / 1000) + (typeof d.expires_in === 'number' ? d.expires_in : 900);
-    return true;
+    return { kind: 'renewed' };
   } catch {
-    return false;
+    return { kind: 'unavailable' };
   }
 }
 
 // Attach the session or 401. The SPA treats 401 as "bounce to /auth/login".
 async function requireSession(req: AuthedRequest, res: Response, next: NextFunction) {
   const sid = req.cookies[SESSION_COOKIE];
-  const sess = await getSession(sid);
+  let sess: SessionData | null;
+  try { sess = await getSession(sid); }
+  catch { return res.status(503).json({ error: 'session_unavailable' }); }
   if (!sess) return res.status(401).json({ error: 'unauthenticated' });
   if (!isTrustedMutation(req, config.publicUrl, config.redirectUri)) {
     return res.status(403).json({ error: 'csrf_rejected' });
   }
-  if (sess.accessExpiresAt <= Math.floor(Date.now() / 1000) + RENEW_SKEW_S && (await renewAccessToken(sess))) {
-    if (!(await updateSession(sid, sess))) return res.status(401).json({ error: 'unauthenticated' });
+  if (sess.accessExpiresAt <= Math.floor(Date.now() / 1000) + RENEW_SKEW_S) {
+    const renewal = await renewAccessToken(sess);
+    if (renewal.kind === 'denied') {
+      // This is local BFF destruction, not final SSO-SID revocation: a later
+      // legitimate login must not inherit a terminal marker from a key failure.
+      try { await destroySession(sid); }
+      catch { return res.status(503).json({ error: 'session_unavailable' }); }
+      return res.status(401).json({ error: renewal.error });
+    }
+    if (renewal.kind === 'renewed' && !(await updateSession(sid, sess))) return res.status(401).json({ error: 'unauthenticated' });
   }
   req.session = sess;
   req.sid = sid;
@@ -108,18 +125,36 @@ function projectProfile(s: SessionData) {
   };
 }
 
-// Best-effort fetch of the caller's granted permissions from the SSO. Returns null
-// on any failure so /api/me can fall back to the cached set (never breaks on it).
-async function fetchPermissions(accessToken: string): Promise<string[] | null> {
+type PermissionResult = { kind: 'allowed'; permissions: string[] }
+  | { kind: 'denied'; status: 401 | 403; error: string }
+  | { kind: 'unavailable' };
+
+// Preserve explicit application denials. A proxy challenge, transport failure or
+// unavailable SSO is not a current authorization decision and retains the cache.
+async function fetchPermissions(accessToken: string): Promise<PermissionResult> {
   try {
     const r = await s2sFetch(config.internal + '/account/permissions', {
       headers: { authorization: 'Bearer ' + accessToken },
     });
-    if (!r.ok) return null;
-    const d = (await r.json().catch(() => null)) as { permissions?: string[] } | null;
-    return Array.isArray(d?.permissions) ? d!.permissions : null;
+    if (r.redirected || r.headers.get('cf-mitigated')?.trim().toLowerCase() === 'challenge'
+      || !/^application\/json(?:\s*;|$)/i.test(r.headers.get('content-type') ?? '')) {
+      await r.body?.cancel().catch(() => {});
+      return { kind: 'unavailable' };
+    }
+    const d = (await r.json().catch(() => null)) as { permissions?: unknown; error?: unknown } | null;
+    if (r.status === 401 && d?.error === 'invalid_token') {
+      return { kind: 'denied', status: 401, error: d.error };
+    }
+    if (r.status === 403 && typeof d?.error === 'string'
+      && ['access_denied', 'client_not_allowed', 'insufficient_scope'].includes(d.error)) {
+      return { kind: 'denied', status: 403, error: d.error };
+    }
+    if (r.ok && Array.isArray(d?.permissions) && d.permissions.every(value => typeof value === 'string')) {
+      return { kind: 'allowed', permissions: d.permissions };
+    }
+    return { kind: 'unavailable' };
   } catch {
-    return null;
+    return { kind: 'unavailable' };
   }
 }
 
@@ -128,9 +163,10 @@ apiRouter.get('/api/me', requireSession, async (req: AuthedRequest, res) => {
   // Refresh permissions while the access token is alive (the client re-hits /api/me
   // on profile load and after a permission_denied). Stale token -> keep the cache.
   if (s.accessExpiresAt > Math.floor(Date.now() / 1000)) {
-    const perms = await fetchPermissions(s.accessToken);
-    if (perms) {
-      s.permissions = perms;
+    const result = await fetchPermissions(s.accessToken);
+    if (result.kind === 'denied') return res.status(result.status).json({ error: result.error });
+    if (result.kind === 'allowed') {
+      s.permissions = result.permissions;
       if (!(await updateSession(req.sid!, s))) return res.status(401).json({ error: 'unauthenticated' });
     }
   }

@@ -123,7 +123,7 @@ export async function enforceTurnstileGate(req: Request, res: Response): Promise
 }
 
 export async function s2sPost(path: string, body: Record<string, unknown>): Promise<globalThis.Response> {
-  const assertion = await s2sAssertion();
+  const assertion = await s2sAssertion(path);
   return s2sFetch(config.internal + path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

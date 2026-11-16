@@ -15,6 +15,7 @@ let _jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 const jwks = () => (_jwks ??= createRemoteJWKSet(new URL(config.internal + '/jwks')));
 
 const SEEN_TTL = 7 * 24 * 3600;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 backchannelRouter.post('/backchannel/events', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -40,6 +41,16 @@ backchannelRouter.post('/backchannel/events', async (req, res) => {
     res.status(400).json({ error: 'invalid_events' });
     return;
   }
+  // Validate the entire logout batch before any member has effects.
+  for (const raw of events) {
+    if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id) {
+      res.status(400).json({ error: 'invalid_event_id' }); return;
+    }
+    if (raw.type === 'logout' && (!UUID.test(raw.id) || typeof raw.payload?.sid !== 'string'
+      || !UUID.test(raw.payload.sid) || typeof raw.payload?.sub !== 'string' || !UUID.test(raw.payload.sub))) {
+      res.status(400).json({ error: 'invalid_logout_event' }); return;
+    }
+  }
 
   for (const raw of events as { id?: unknown; type?: unknown; payload?: unknown }[]) {
     const id = typeof raw.id === 'string' ? raw.id : null;
@@ -48,19 +59,21 @@ backchannelRouter.post('/backchannel/events', async (req, res) => {
       res.status(400).json({ error: 'invalid_event_id' });
       return;
     }
-    const fresh = await redis.set(`evt:seen:${id}`, '1', 'EX', SEEN_TTL, 'NX');
-    if (!fresh) continue; // already processed (retry redelivery)
-
     try {
+      // Pre-effect seen keys from earlier releases are not proof of completion.
+      // A duplicate repeats the idempotent effect until one delivery completes;
+      // it must not acknowledge simply because another delivery is in progress.
+      const completed = `evt:completed:v2:${UUID.test(id) ? id.toLowerCase() : id}`;
+      if (await redis.get(completed)) continue;
       if (type === 'logout') {
-        const p = (raw.payload ?? {}) as { sid?: unknown };
-        if (typeof p.sid === 'string') await revokeBySsoSid(p.sid);
+        const p = raw.payload as { sid: string; sub: string };
+        await revokeBySsoSid(p.sid, p.sub);
       } else {
         console.log(`events: acked unknown type '${type}'`);
       }
+      await redis.set(completed, '1', 'EX', SEEN_TTL);
     } catch (e) {
       console.error(`events: ${type} failed:`, (e as Error).message);
-      await redis.del(`evt:seen:${id}`).catch(() => { /* let the retry reprocess */ });
       res.status(500).json({ error: 'processing_failed' });
       return;
     }
