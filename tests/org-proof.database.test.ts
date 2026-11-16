@@ -12,7 +12,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
   const url = new URL(connectionString);
   if (url.hostname !== '127.0.0.1' || url.pathname !== '/dreamsso_role_sync_test') throw new Error('Only the generated local fixture database is allowed.');
   const issuer = 'https://proof.example.invalid';
-  process.env.DOTENV_CONFIG_PATH = '/dev/null';process.env.DATABASE_URL = connectionString;process.env.ISSUER = issuer;
+  process.env.DOTENV_CONFIG_PATH = '/dev/null';process.env.DATABASE_URL = connectionString;process.env.ISSUER = issuer;process.env.ACCOUNT_CLIENT_ID = 'account';
   const { assertOrgRoleProof } = await import('../src/rbac/orgProof.js');
   const { RoleAccessError } = await import('../src/rbac/roleAdministration.js');
   const { withRoleTransaction } = await import('../src/rbac/roleChanges.js');
@@ -26,7 +26,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
   const keys = await generateKeyPair('EdDSA'), jwk = await exportJWK(keys.publicKey);jwk.kid = 'generated-proof-key';
   const sign = async (scope = 'profile', expired = false) => {
     const now = Math.floor(Date.now() / 1000);
-    return new SignJWT({ scope }).setProtectedHeader({ alg: 'EdDSA', kid: jwk.kid }).setIssuer(issuer).setAudience(issuer)
+    return new SignJWT({ scope, client_id: 'account' }).setProtectedHeader({ alg: 'EdDSA', kid: jwk.kid, typ: 'at+jwt' }).setIssuer(issuer).setAudience(issuer)
       .setSubject(actor).setIssuedAt(now - (expired ? 120 : 0)).setExpirationTime(now + (expired ? -1 : 600)).sign(keys.privateKey);
   };
   const request = async (scope = 'profile', expired = false, session = sid): Promise<AuthedRequest> =>

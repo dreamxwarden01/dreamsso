@@ -1,5 +1,6 @@
 import type pg from 'pg';
-import { verifyAccessToken, type AuthedRequest } from '../resourceAuth.js';
+import { verifyAccessToken, accountResourceError, type AuthedRequest } from '../resourceAuth.js';
+import { config } from '../config.js';
 import { acceptedStrongStepup, stepupSatisfies, stepupStampFresh, stepupValidityMinutes } from '../oidc/stepupRules.js';
 import { RoleAccessError } from './roleAdministration.js';
 
@@ -7,7 +8,8 @@ import { RoleAccessError } from './roleAdministration.js';
 export async function assertOrgRoleProof(db: pg.PoolClient, req: AuthedRequest): Promise<void> {
   const current = await verifyAccessToken(req, db);
   if (!current || current.sub !== req.auth?.sub) throw new RoleAccessError(401, { error: 'invalid_token' });
-  if (!current.scopes.includes('profile')) throw new RoleAccessError(403, { error: 'insufficient_scope' });
+  const denied = accountResourceError(current, 'profile', config.accountClientId);
+  if (denied) throw new RoleAccessError(403, { error: denied });
   // Read fresh policy inside this transaction: a process-cache value may have
   // preceded a concurrent tightening of the step-up requirement/window.
   const { rows } = await db.query<{ key: string; value: string }>(

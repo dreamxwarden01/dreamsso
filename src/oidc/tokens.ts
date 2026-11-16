@@ -14,8 +14,8 @@ export async function mintIdToken(p: {
   authTime: number;
   sid?: string;
   extra: Record<string, unknown>;
-}): Promise<string> {
-  const { kid, privateKey } = await getSigningKey();
+}, signingKey?: Awaited<ReturnType<typeof getSigningKey>>): Promise<string> {
+  const { kid, privateKey } = signingKey ?? await getSigningKey();
   const now = Math.floor(Date.now() / 1000);
   const payload: Record<string, unknown> = { amr: p.amr, auth_time: p.authTime, azp: p.clientId, ...p.extra };
   if (p.nonce) payload.nonce = p.nonce;
@@ -31,8 +31,8 @@ export async function mintIdToken(p: {
     .sign(privateKey);
 }
 
-export async function mintAccessToken(p: { sub: string; clientId: string; scope: string }): Promise<string> {
-  const { kid, privateKey } = await getSigningKey();
+export async function mintAccessToken(p: { sub: string; clientId: string; scope: string }, signingKey?: Awaited<ReturnType<typeof getSigningKey>>): Promise<string> {
+  const { kid, privateKey } = signingKey ?? await getSigningKey();
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({ scope: p.scope, client_id: p.clientId })
     .setProtectedHeader({ alg: 'EdDSA', kid, typ: 'at+jwt' })

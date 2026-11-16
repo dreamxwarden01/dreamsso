@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { s2sAssertion } from '../oidc.js';
 import { s2sFetch } from '../s2sFetch.js';
 import { SESSION_COOKIE } from './auth.js';
+import { isTrustedMutation } from '../request-source.js';
 
 export const apiRouter = Router();
 
@@ -84,8 +85,11 @@ async function requireSession(req: AuthedRequest, res: Response, next: NextFunct
   const sid = req.cookies[SESSION_COOKIE];
   const sess = await getSession(sid);
   if (!sess) return res.status(401).json({ error: 'unauthenticated' });
+  if (!isTrustedMutation(req, config.publicUrl, config.redirectUri)) {
+    return res.status(403).json({ error: 'csrf_rejected' });
+  }
   if (sess.accessExpiresAt <= Math.floor(Date.now() / 1000) + RENEW_SKEW_S && (await renewAccessToken(sess))) {
-    await updateSession(sid, sess);
+    if (!(await updateSession(sid, sess))) return res.status(401).json({ error: 'unauthenticated' });
   }
   req.session = sess;
   req.sid = sid;
@@ -127,7 +131,7 @@ apiRouter.get('/api/me', requireSession, async (req: AuthedRequest, res) => {
     const perms = await fetchPermissions(s.accessToken);
     if (perms) {
       s.permissions = perms;
-      await updateSession(req.sid!, s);
+      if (!(await updateSession(req.sid!, s))) return res.status(401).json({ error: 'unauthenticated' });
     }
   }
   res.json({
@@ -176,7 +180,7 @@ apiRouter.patch('/api/profile', requireSession, async (req: AuthedRequest, res) 
     if (id.display_name !== undefined) s.claims.name = id.display_name;
     if (id.email !== undefined) s.claims.email = id.email;
     if (id.email_verified !== undefined) s.claims.email_verified = id.email_verified;
-    await updateSession(req.sid!, s);
+    if (!(await updateSession(req.sid!, s))) return res.status(401).json({ error: 'unauthenticated' });
   }
   res.json({ profile: projectProfile(s) });
 });
@@ -325,7 +329,7 @@ apiRouter.post(
     const data = (await upstream.json().catch(() => null)) as { avatar?: string } | null;
     if (upstream.ok && data?.avatar) {
       s.claims.picture = data.avatar;
-      await updateSession(req.sid!, s);
+      if (!(await updateSession(req.sid!, s))) return res.status(401).json({ error: 'unauthenticated' });
     }
     res.status(upstream.status).json(data);
   },
@@ -347,7 +351,7 @@ apiRouter.delete('/api/avatar', requireSession, async (req: AuthedRequest, res: 
   }
   if (upstream.ok) {
     delete s.claims.picture;
-    await updateSession(req.sid!, s);
+    if (!(await updateSession(req.sid!, s))) return res.status(401).json({ error: 'unauthenticated' });
   }
   if (upstream.status === 204) return res.status(204).end();
   res.status(upstream.status).json(await upstream.json().catch(() => null));

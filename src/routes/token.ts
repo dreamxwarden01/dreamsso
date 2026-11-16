@@ -1,19 +1,19 @@
 import { Router, type Request, type Response } from 'express';
-import crypto from 'node:crypto';
-import { jwtVerify, createLocalJWKSet } from 'jose';
+import { jwtVerify } from 'jose';
+import { createUserinfoHandler, type UserinfoProfile } from '../oidc/userinfo.js';
 import { clientKeySet } from '../clientKeys.js';
 import { pool } from '../db.js';
 import { consumeCode } from '../oidc/codes.js';
 import { getSessionWindows } from '../oidc/sessions.js';
 import { mintIdToken, mintAccessToken } from '../oidc/tokens.js';
 import { readAccessStateSnapshot } from '../backchannel/accessStateStore.js';
-import { getJwks } from '../keys.js';
+import { getJwks, getSigningKey } from '../keys.js';
+import { redeemAuthorizationCode, CodeRedemptionError } from '../oidc/codeRedemption.js';
 import { config } from '../config.js';
 import { getSetting } from '../settings.js';
 
 export const tokenRouter = Router();
 
-const s256 = (verifier: string) => crypto.createHash('sha256').update(verifier).digest('base64url');
 const fail = (res: Response, status: number, error: string, desc?: string) =>
   res.status(status).json(desc ? { error, error_description: desc } : { error });
 
@@ -54,109 +54,32 @@ tokenRouter.post('/token', async (req: Request, res: Response) => {
     return fail(res, 401, 'invalid_client', 'assertion verification failed');
   }
 
-  // --- redeem the authorization code (single use) ---
-  const ac = await consumeCode(b.code ?? '');
-  if (!ac) return fail(res, 400, 'invalid_grant', 'code invalid or expired');
-  if (ac.clientId !== client.client_id) return fail(res, 400, 'invalid_grant', 'client mismatch');
-  if (ac.redirectUri !== b.redirect_uri) return fail(res, 400, 'invalid_grant', 'redirect_uri mismatch');
-
-  // --- PKCE ---
-  if (!b.code_verifier || s256(b.code_verifier) !== ac.codeChallenge) {
-    return fail(res, 400, 'invalid_grant', 'PKCE verification failed');
-  }
-
-  // --- claims by scope ---
-  const scopes = ac.scope.split(' ');
-  const extra: Record<string, unknown> = {};
-  if (scopes.includes('profile') || scopes.includes('email')) {
-    const { rows: [id] } = await pool.query(
-      'SELECT username, display_name, email, email_verified, avatar FROM identities WHERE sub = $1',
-      [ac.userSub],
-    );
-    if (id) {
-      if (scopes.includes('profile')) {
-        extra.name = id.display_name;
-        extra.preferred_username = id.username;
-        // picture = the avatar FILE NAME (not a URL): each app serves its own
-        // session-gated copy and fetches the bytes S2S when the name changes.
-        if (id.avatar) extra.picture = id.avatar;
-      }
-      if (scopes.includes('email')) { extra.email = id.email; extra.email_verified = id.email_verified; }
-    }
-  }
-  // Org name handover: every app learns the SSO's site_name at login and keeps
-  // it fresh via the org.settings event.
-  extra.site_name = (await getSetting('site_name', 'DreamSSO'))!;
-
-  // Record that this client redeemed a code under the session (append-if-absent).
-  // Drives the Devices pane's apps-accessed list and scopes back-channel logout
-  // fan-out to apps actually used. Best-effort: log, don't fail the token response.
-  if (ac.sid) {
-    pool
-      .query(
-        `UPDATE sessions SET clients = array_append(clients, $2)
-           WHERE sid = $1 AND NOT ($2 = ANY(clients))`,
-        [ac.sid, client.client_id],
-      )
-      .catch((e) => console.warn('session_clients upsert failed:', (e as Error).message));
-
-    // Tell the RP how durable the SSO session behind this login is: persistence
-    // (KMSI answer) + the absolute expiry under the applicable window. RPs issue
-    // a session cookie for transient, an expiring cookie capped at
-    // min(own window, sess_exp) for persistent — RP sessions never outlive ours.
-    const { rows: [sess] } = await pool.query<{ persistent: boolean; created_at: string }>(
-      'SELECT persistent, EXTRACT(EPOCH FROM created_at)::bigint AS created_at FROM sessions WHERE sid = $1',
-      [ac.sid],
-    );
-    if (sess) {
-      const { maxHours, transientMaxHours } = await getSessionWindows();
-      extra.sess_persistent = sess.persistent;
-      extra.sess_exp = Number(sess.created_at) + (sess.persistent ? maxHours : transientMaxHours) * 3600;
-    }
-  }
-
-  // The SSO defines the app role AT LOGIN (user decision): catalog clients get
-  // the caller's effective role in the id_token — `app_role` carries the APP'S
-  // OWN role_id (the ids it reported in roles.sync). The RP applies it at the
-  // callback like an event report: update + cache purge when it differs.
-  // Absent for catalog-less clients (the account portal has no role model).
   try {
-    const snapshot = await readAccessStateSnapshot(pool, client.client_id, [ac.userSub]);
-    const state = snapshot.states[0];
-    if (snapshot.states.length !== 1 || !state.allowed) return fail(res, 403, 'access_denied');
-    if (state.rp.catalog_synced) {
-      if (!snapshot.authority) return fail(res, 503, 'temporarily_unavailable');
-      extra.app_role = state.rp.role_id;
-      extra.app_role_epoch = snapshot.authority.epoch;
-      extra.app_role_revision = snapshot.authority.revision;
-    }
-  } catch { return fail(res, 503, 'temporarily_unavailable'); }
-
-  const id_token = await mintIdToken({
-    sub: ac.userSub, clientId: client.client_id, nonce: ac.nonce, acr: ac.acr, amr: ac.amr, authTime: ac.authTime, sid: ac.sid, extra,
-  });
-  const access_token = await mintAccessToken({ sub: ac.userSub, clientId: client.client_id, scope: ac.scope });
-  res.json({ access_token, token_type: 'Bearer', expires_in: 900, id_token, scope: ac.scope });
+    const tokens = await redeemAuthorizationCode({ clientId: client.client_id,
+      code: b.code ?? '', redirectUri: b.redirect_uri, verifier: b.code_verifier }, {
+      database: pool, consumeCode, readAccessStateSnapshot,
+      prepare: async () => {
+        const [signingKey, windows, siteName] = await Promise.all([
+          getSigningKey(), getSessionWindows(), getSetting('site_name', 'DreamSSO'),
+        ]);
+        return { windows, siteName: siteName ?? 'DreamSSO',
+          mintIdToken: claims => mintIdToken(claims, signingKey),
+          mintAccessToken: claims => mintAccessToken(claims, signingKey) };
+      },
+    });
+    res.json(tokens);
+  } catch (error) {
+    if (error instanceof CodeRedemptionError) return fail(res, error.status, error.code, error.description);
+    return fail(res, 503, 'temporarily_unavailable');
+  }
 });
 
-tokenRouter.get('/userinfo', async (req: Request, res: Response) => {
-  res.setHeader('Cache-Control', 'no-store');
-  const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
-  if (!m) return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'invalid_token' });
-  try {
-    const jwks = createLocalJWKSet(await getJwks());
-    const { payload } = await jwtVerify(m[1], jwks, { issuer: config.issuer, audience: config.issuer });
-    const { rows: [id] } = await pool.query(
-      'SELECT sub, username, display_name, email, email_verified, avatar FROM identities WHERE sub = $1',
-      [payload.sub],
-    );
-    if (!id) return res.status(401).set('WWW-Authenticate', 'Bearer error="invalid_token"').json({ error: 'invalid_token' });
-    const scopes = String(payload.scope ?? '').split(' ');
-    const out: Record<string, unknown> = { sub: id.sub };
-    if (scopes.includes('profile')) { out.name = id.display_name; out.preferred_username = id.username; if (id.avatar) out.picture = id.avatar; }
-    if (scopes.includes('email')) { out.email = id.email; out.email_verified = id.email_verified; }
-    res.json(out);
-  } catch {
-    res.status(401).set('WWW-Authenticate', 'Bearer error="invalid_token"').json({ error: 'invalid_token' });
-  }
-});
+tokenRouter.get('/userinfo', createUserinfoHandler({
+  issuer: () => config.issuer,
+  jwks: getJwks,
+  profile: async sub => {
+    const { rows } = await pool.query<UserinfoProfile>(
+      'SELECT sub, username, display_name, email, email_verified, avatar FROM identities WHERE sub = $1', [sub]);
+    return rows[0];
+  },
+}));

@@ -6,7 +6,7 @@
 import { Router, type Request } from 'express';
 import * as oidc from '../oidc.js';
 import { config } from '../config.js';
-import { createSession, destroySession, getSession, revokeBySsoSid } from '../session.js';
+import { createSession, destroySession, getSession } from '../session.js';
 
 export const authRouter = Router();
 
@@ -98,16 +98,21 @@ authRouter.get('/auth/callback', async (req, res) => {
     const merged = { ...claims, ...(info ?? {}) };
 
     const now = Math.floor(Date.now() / 1000);
-    // Rotate: one live BFF session per SSO session — drop the browser's prior
-    // session for this `sid` (e.g. after a silent re-auth on browser reopen).
+    // createSession atomically rotates the prior BFF session and its SID index.
     const ssoSid = typeof claims.sid === 'string' ? claims.sid : undefined;
-    if (ssoSid) await revokeBySsoSid(ssoSid);
     // Session durability follows the SSO's KMSI claims: the BFF session TTL is
     // capped at the SSO session's absolute expiry, and the cookie is persistent
     // only when the user chose "stay signed in" (else browser-session).
     const persistent = claims.sess_persistent === true;
-    const sessExp = typeof claims.sess_exp === 'number' ? claims.sess_exp : null;
-    const ttl = Math.max(60, sessExp ? Math.min(config.sessionTtl, sessExp - now) : config.sessionTtl);
+    const sessExp = claims.sess_exp;
+    // NumericDate may include fractional seconds. Redis EX needs whole seconds;
+    // round down using the current clock, never extend a nearly-expired session.
+    // Only a missing legacy claim permits the configured-lifetime fallback.
+    if (sessExp !== undefined && (typeof sessExp !== 'number' || !Number.isFinite(sessExp))) {
+      throw new Error('invalid_session_expiry');
+    }
+    const ttl = Math.floor(Math.min(config.sessionTtl, sessExp === undefined ? config.sessionTtl : sessExp - Date.now() / 1000));
+    if (!Number.isSafeInteger(ttl) || ttl <= 0) throw new Error('session_expired');
     const sid = await createSession({
       sub: String(claims.sub),
       ssoSid,

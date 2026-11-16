@@ -28,7 +28,9 @@ against.
   URL and fetches it lazily. Client-key rotation needs no re-registration.
 - **Two-key auth split.** The RP/BFF private key does client authentication (`private_key_jwt`) and
   the signed back-channel event envelope; a separate per-user access token authorizes the portal's
-  `/account/*` resource API. They are never collapsed.
+  `/account/*` resource API. These resources require a token issued to the configured account
+  client; other RPs continue to use `/userinfo` for profile claims. Registered scope limits apply
+  during authorization and code exchange.
 - **The account portal is a thin BFF** — a Redis session cache plus an HTTP proxy to the SSO. It holds
   no database and no key-encryption key; its only persistent state is a few local files.
 - **Step-up MFA** (TOTP / passkey) is tiered and enforced server-side per surface; sensitive
@@ -47,13 +49,17 @@ npm install && npm run dev            # SSO on :3000 (tsx watch)
 Then open the SSO, which boots into its first-run `/setup` wizard (the token is printed to the
 console). The account portal (`account/server`, `PORT=4001`) and its own `/setup` wizard follow.
 The S2S API schemas (for Cloudflare API Shield) live in [`docs/security/`](docs/security/).
+Redis 6.2 or newer is required for atomic authorization-code consumption. The account portal's
+public URL must match its browser origin; authenticated writes enforce that origin, including
+for binary uploads. When no public URL is set, the registered redirect URI supplies the origin.
 
 ## Tests
 
 ```bash
 npm run typecheck
 npm run test:events              # Synthetic role/event and HTTP regressions
-npm run test:events:db           # Disposable local PostgreSQL integration tests
+npm run test:auth-security       # Resource boundaries, code redemption and BFF regressions
+npm run test:events:db           # Disposable local PostgreSQL and Redis integration tests
 ```
 
 Database tests use the `orbstack` Docker context by default. Set

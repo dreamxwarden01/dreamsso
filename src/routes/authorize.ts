@@ -1,3 +1,4 @@
+import { scopesAllowed } from '../oidc/scopes.js';
 import { Router, type Request, type Response } from 'express';
 import crypto from 'node:crypto';
 import { pool } from '../db.js';
@@ -219,7 +220,7 @@ authorizeRouter.get('/authorize', async (req: Request, res: Response) => {
   const redirectUri = qstr(req.query.redirect_uri);
 
   const { rows } = await pool.query(
-    'SELECT client_id, redirect_uris, name, disabled_at FROM oauth_clients WHERE client_id = $1',
+    'SELECT client_id, redirect_uris, name, disabled_at, allowed_scopes FROM oauth_clients WHERE client_id = $1',
     [clientId],
   );
   const client = rows[0];
@@ -249,7 +250,7 @@ authorizeRouter.get('/authorize', async (req: Request, res: Response) => {
     return res.redirect(u.toString());
   };
   if (responseType !== 'code') return errorRedirect('unsupported_response_type');
-  if (!scope.split(' ').includes('openid')) return errorRedirect('invalid_scope', 'openid required');
+  if (!scopesAllowed(scope, client.allowed_scopes)) return errorRedirect('invalid_scope', 'Scope exceeds the registered grant');
   if (!codeChallenge || codeChallengeMethod !== 'S256') {
     return errorRedirect('invalid_request', 'PKCE S256 required');
   }
