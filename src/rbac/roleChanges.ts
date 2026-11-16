@@ -57,6 +57,8 @@ interface EffectiveRow {
   known: boolean;
   previous_role: number | null;
   previous_managed: boolean | null;
+  account_status: 'active' | 'disabled' | 'locked' | 'deleted';
+  previous_account_status: 'active' | 'disabled' | 'locked' | 'deleted' | null;
 }
 
 /** The state mutation, authority revision, ledger and delivery intent share one transaction. */
@@ -69,19 +71,23 @@ export async function publishRoleChanges(db: pg.PoolClient, clientIds: string[],
     const { rows } = await db.query<EffectiveRow>(`WITH effective AS(
       SELECT i.sub AS user_sub,CASE WHEN ov.user_sub IS NOT NULL THEN ov.app_role_id
         WHEN od.role_slug IS NOT NULL THEN od.app_role_id ELSE cat.default_role_id END AS raw_role,
-        cat.client_id IS NOT NULL AS managed
+        cat.client_id IS NOT NULL AS managed,
+        CASE WHEN i.deleted_at IS NOT NULL THEN 'deleted' ELSE i.status END AS account_status
       FROM identities i JOIN app_role_catalogs cat ON cat.client_id=$1
       LEFT JOIN user_app_role_overrides ov ON ov.user_sub=i.sub AND ov.client_id=$1
       LEFT JOIN user_org_roles ur ON ur.user_sub=i.sub
       LEFT JOIN org_role_app_defaults od ON od.role_slug=ur.org_role_slug AND od.client_id=$1
-      WHERE i.deleted_at IS NULL AND ($2::uuid[] IS NULL OR i.sub=ANY($2::uuid[])))
-      SELECT e.user_sub,r.role_id,e.managed,p.user_sub IS NOT NULL AS known,
-        p.role_id AS previous_role,p.managed AS previous_managed
+      WHERE ($2::uuid[] IS NULL OR i.sub=ANY($2::uuid[]))
+        AND (i.deleted_at IS NULL OR $2::uuid[] IS NOT NULL OR EXISTS(
+          SELECT 1 FROM app_role_effective prior WHERE prior.client_id=$1 AND prior.user_sub=i.sub)))
+      SELECT e.user_sub,r.role_id,e.managed,e.account_status,p.user_sub IS NOT NULL AS known,
+        p.role_id AS previous_role,p.managed AS previous_managed,p.account_status AS previous_account_status
       FROM effective e LEFT JOIN app_roles r ON r.client_id=$1 AND r.role_id=e.raw_role
       LEFT JOIN app_role_effective p ON p.client_id=$1 AND p.user_sub=e.user_sub
       ORDER BY e.user_sub`, [clientId, subjects ? [...new Set(subjects)] : null]);
     const changed = rows.filter(row => options.force || forcedSubjects.has(row.user_sub)
-      || !row.known || row.role_id !== row.previous_role || row.managed !== row.previous_managed);
+      || !row.known || row.role_id !== row.previous_role || row.managed !== row.previous_managed
+      || row.account_status !== row.previous_account_status);
     if (!changed.length) continue;
     const { rows: [advanced] } = await db.query<{ revision: string }>(`UPDATE app_role_sync_state
       SET authority_revision=authority_revision+1 WHERE client_id=$1 AND authority_revision<9223372036854775807
@@ -90,13 +96,14 @@ export async function publishRoleChanges(db: pg.PoolClient, clientIds: string[],
     for (let offset = 0; offset < changed.length; offset += 100) {
       const part = changed.slice(offset, offset + 100);
       await insertEvents(db, clientId, part.map(row => ({ type: 'account.roles_change', version: advanced.revision,
-        payload: { sub: row.user_sub, role_id: row.role_id, authority_epoch: state.authority_epoch, authority_revision: advanced.revision } })));
-      await db.query(`INSERT INTO app_role_effective(client_id,user_sub,role_id,managed,authority_revision)
-        SELECT $1,v.user_sub,v.role_id,v.managed,$2::bigint
-        FROM jsonb_to_recordset($3::jsonb) AS v(user_sub uuid,role_id integer,managed boolean)
+        payload: { sub: row.user_sub, role_id: row.role_id, account_status: row.account_status,
+          authority_epoch: state.authority_epoch, authority_revision: advanced.revision } })));
+      await db.query(`INSERT INTO app_role_effective(client_id,user_sub,role_id,managed,account_status,authority_revision)
+        SELECT $1,v.user_sub,v.role_id,v.managed,v.account_status,$2::bigint
+        FROM jsonb_to_recordset($3::jsonb) AS v(user_sub uuid,role_id integer,managed boolean,account_status text)
         ON CONFLICT(client_id,user_sub) DO UPDATE SET role_id=excluded.role_id,managed=excluded.managed,
-          authority_revision=excluded.authority_revision`, [clientId, advanced.revision,
-        JSON.stringify(part.map(row => ({ user_sub: row.user_sub, role_id: row.role_id, managed: row.managed })))]);
+          account_status=excluded.account_status,authority_revision=excluded.authority_revision`, [clientId, advanced.revision,
+        JSON.stringify(part.map(row => ({ user_sub: row.user_sub, role_id: row.role_id, managed: row.managed, account_status: row.account_status })))]);
     }
     count += changed.length;
   }

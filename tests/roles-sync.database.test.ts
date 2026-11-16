@@ -308,6 +308,9 @@ test('catalog and inbox changes share real PostgreSQL authority/outbox transacti
       await database.query("INSERT INTO user_app_role_overrides(user_sub,client_id,app_role_id) VALUES($1,'root-baseline',NULL)", [subjects.rootDenied]);
       await database.query(migration);
       assert.equal((await database.query("SELECT role_id FROM app_role_effective WHERE client_id='root-baseline' AND user_sub=$1", [subjects.root])).rows[0].role_id, 0);
+      // This scenario isolates root-default repair after the current active
+      // account-status baseline; legacy unknown-status repair has its own suite.
+      await database.query("UPDATE app_role_effective SET account_status='active' WHERE client_id='root-baseline'");
       await database.query(`UPDATE app_role_sync_state SET catalog_mode='revisioned',catalog_epoch=$1,catalog_revision=1,catalog_digest=$2
         WHERE client_id='root-baseline'`, [EPOCH, catalogDigest(normalizeRoleCatalog(catalog('1', 0, [{ role_id: 0, name: 'Owner', level: 0 }])))]);
       await apply('root-baseline', catalog('2', 0, [{ role_id: 0, name: 'Owner', level: 0 }]));

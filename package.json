@@ -18,7 +18,7 @@
     "test:keys:linux:source": "ACCOUNT_KEY_SOURCE=1 node --import tsx --test tests/account-key-linux.mjs",
     "test:shutdown": "node --import tsx --test tests/service-lifecycle.test.ts",
     "test:auth-ui": "node --import tsx --test tests/auth-motion.test.ts tests/auth-pages.test.ts tests/auth-native-motion.test.ts",
-    "test:auth-security": "node --import tsx --test tests/sso-auth-boundary.test.ts tests/code-redemption.test.ts tests/account-security.test.ts tests/account-security-callback.test.ts tests/account-assertion-issuer.test.ts tests/account-logout-receiver.test.ts"
+    "test:auth-security": "node --import tsx --test tests/sso-auth-boundary.test.ts tests/code-redemption.test.ts tests/account-security.test.ts tests/account-security-callback.test.ts tests/account-logout-receiver.test.ts tests/account-assertion-issuer.test.ts tests/auth-client-assertion.test.ts tests/auth-client-assertion-routes.test.ts tests/auth-bearer-liveness.test.ts tests/auth-manual-assertions.test.ts"
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",

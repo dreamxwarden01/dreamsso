@@ -26,7 +26,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
   const keys = await generateKeyPair('EdDSA'), jwk = await exportJWK(keys.publicKey);jwk.kid = 'generated-proof-key';
   const sign = async (scope = 'profile', expired = false) => {
     const now = Math.floor(Date.now() / 1000);
-    return new SignJWT({ scope, client_id: 'account' }).setProtectedHeader({ alg: 'EdDSA', kid: jwk.kid, typ: 'at+jwt' }).setIssuer(issuer).setAudience(issuer)
+    return new SignJWT({ scope, client_id: 'account', sid }).setProtectedHeader({ alg: 'EdDSA', kid: jwk.kid, typ: 'at+jwt' }).setIssuer(issuer).setAudience(issuer)
       .setSubject(actor).setIssuedAt(now - (expired ? 120 : 0)).setExpirationTime(now + (expired ? -1 : 600)).sign(keys.privateKey);
   };
   const request = async (scope = 'profile', expired = false, session = sid): Promise<AuthedRequest> =>
@@ -42,6 +42,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
     await admin.query(`CREATE SCHEMA ${schema}`);
     await database.query((await readFile(new URL('../db/schema.sql', import.meta.url), 'utf8')).replace(/^CREATE EXTENSION[^\n]*$/gm, ''));
     await database.query("INSERT INTO identities(sub,username,display_name) VALUES($1,'proof-actor','Proof actor'),($2,'proof-other','Proof other')", [actor, other]);
+    await database.query("INSERT INTO oauth_clients(client_id,name,redirect_uris) VALUES('account','Account','{}')");
     // Verification reads only the generated public JWK. The private-key column
     // deliberately contains unusable synthetic bytes and is never decrypted.
     await database.query("INSERT INTO signing_keys(kid,public_jwk,private_key_enc,status) VALUES($1,$2,$3,'current')", [jwk.kid, jwk, Buffer.from('synthetic-not-a-private-key')]);

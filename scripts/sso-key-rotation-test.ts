@@ -118,7 +118,7 @@ async function runFlow() {
   rr = await answerKmsi(SSO, rr, t, cs);
   const code = new URL(rr.headers.get('location')!).searchParams.get('code')!;
   const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
+  const assertion = await new SignJWT({ method: 'POST', path: '/token' })
     .setProtectedHeader({ alg: 'EdDSA', kid: pubJwk.kid as string })
     .setIssuer(TESTAPP).setSubject(TESTAPP).setAudience(SSO)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(privateKey);

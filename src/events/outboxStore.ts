@@ -69,6 +69,11 @@ async function lockDestination(db: EventQuery, clientId: string): Promise<void> 
   await db.query('SELECT client_id FROM event_destinations WHERE client_id=$1 FOR UPDATE', [clientId]);
 }
 
+/** Multi-purpose transactions acquire one globally ordered destination set. */
+export async function lockEventDestinations(db: EventQuery, clientIds: readonly string[]): Promise<void> {
+  for (const clientId of [...new Set(clientIds)].sort()) await lockDestination(db, clientId);
+}
+
 export interface PendingRow extends WireEvent { attempts: number; due: boolean }
 export interface DestinationClaim {
   clientId: string; token: string; uri: string | null; disabled: boolean; failures: number; events: PendingRow[];

@@ -310,7 +310,7 @@ emailChangeRouter.post('/account/username-change', scoped, async (req: AuthedReq
 // confirm), then notifies the OLD address — after everything, per the design.
 emailChangeRouter.post('/internal/email-change/verify', async (req, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
 
   const rec = await redeemEmailChange(qstr(body.token));
   if (!rec) return res.status(422).json({ error: 'invalid_token' });

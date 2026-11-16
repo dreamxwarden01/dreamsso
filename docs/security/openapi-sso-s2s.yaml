@@ -37,6 +37,8 @@ components:
       description: >
         RFC 7523 private_key_jwt in the form body (not really a cookie; modeled as
         apiKey for tooling). client_assertion_type + client_assertion fields; iss=sub=client_id,
+        required integer iat/exp (at most 120 seconds), fresh single-use jti, and signed
+        method/path matching the request. The proof cannot be reused across endpoints;
         aud in [issuer, issuer/token], signed by the client's registered key (jwks_uri/jwks).
     rpQuerySignature:
       type: http

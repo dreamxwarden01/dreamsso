@@ -5,7 +5,7 @@ import { requireScope, type AuthedRequest } from '../resourceAuth.js';
 import { requirePerm, hasPerm, permissionDenied } from '../rbac/index.js';
 import * as mfa from '../mfa.js';
 import * as webauthn from '../webauthn.js';
-import { fanOutLogout } from '../oidc/backchannel.js';
+import { revokeSessions, withSessionRevocation } from '../oidc/backchannel.js';
 import { isStepupFresh } from '../oidc/sessions.js';
 import { acceptedStepupMethods, stepupSatisfies } from '../oidc/stepupPolicy.js';
 
@@ -150,20 +150,16 @@ securityRouter.post('/account/password', scoped, requirePerm('profile.security.p
   if (!id) return res.status(404).json({ error: 'not_found' });
 
   const hash = await argon2.hash(new_password, { type: argon2.argon2id });
-  await pool.query(`UPDATE identities SET password_hash = $2, password_changed_at = now() WHERE sub = $1`, [sub, hash]);
 
   // A changed password signs out every OTHER session (stated on the page).
   // The caller's own master sid rides in from the BFF; without a valid one,
   // deny-safe: revoke everything.
   const currentSid = typeof req.headers['x-stepup-sid'] === 'string' ? req.headers['x-stepup-sid'] : '';
   const keep = /^[0-9a-f-]{36}$/.test(currentSid);
-  const { rows: revoked } = await pool.query<{ sid: string; clients: string[] | null }>(
-    keep
-      ? `DELETE FROM sessions WHERE user_sub = $1 AND sid <> $2 RETURNING sid, clients`
-      : `DELETE FROM sessions WHERE user_sub = $1 RETURNING sid, clients`,
-    keep ? [sub, currentSid] : [sub],
-  );
-  await Promise.allSettled(revoked.map((r) => fanOutLogout(sub, r.sid, r.clients ?? [])));
+  await withSessionRevocation(async db => {
+    await db.query('UPDATE identities SET password_hash=$2,password_changed_at=now() WHERE sub=$1', [sub, hash]);
+    await revokeSessions(db, { subject: sub, ...(keep ? { exceptSid: currentSid } : {}) });
+  });
   res.status(204).end();
 });
 

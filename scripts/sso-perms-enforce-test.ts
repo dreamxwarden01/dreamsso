@@ -52,7 +52,7 @@ async function accessToken(): Promise<string> {
   const code = new URL(r.headers.get('location')!).searchParams.get('code')!;
   const key = await importJWK(KEY, 'EdDSA');
   const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
+  const assertion = await new SignJWT({ method: 'POST', path: '/token' })
     .setProtectedHeader({ alg: 'EdDSA', kid: KEY.kid })
     .setIssuer(CLIENT).setSubject(CLIENT).setAudience(SSO)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);

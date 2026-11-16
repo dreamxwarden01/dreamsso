@@ -52,7 +52,7 @@ async function signVerdict(clientId: string, sid: string): Promise<string> {
 
 sessionActivityRouter.post('/internal/session-activity', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  const clientId = await assertedClient(body);
+  const clientId = await assertedClient(body, { method: req.method, path: req.path });
   if (!clientId) return res.status(401).json({ error: 'invalid_client' });
 
   const sid = String(body.sid ?? '');

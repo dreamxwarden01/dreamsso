@@ -1,21 +1,21 @@
 import { Router, type Request, type Response } from 'express';
 import crypto from 'node:crypto';
 import argon2 from 'argon2';
-import { jwtVerify } from 'jose';
 import { pool } from '../db.js';
 import { config } from '../config.js';
 import { getSetting, hasSetting, getSecretSetting } from '../settings.js';
 import { findByUsernameOrEmail, type Identity } from '../oidc/identities.js';
 import { createSession, clientGeo } from '../oidc/sessions.js';
 import { createTxn } from '../oidc/transactions.js';
-import { fanOutLogout } from '../oidc/backchannel.js';
+import { revokeSessions, withSessionRevocation } from '../oidc/backchannel.js';
+import { assertedPortal } from '../oidc/clientAssertion.js';
+import type { AssertionOperation } from '../oidc/clientAssertionValidation.js';
 import { countAuthenticators, verifyLoginTotp } from '../mfa.js';
 import { countPasskeys, loginAuthOptions, verifyLoginAssertion } from '../webauthn.js';
 import { sendEmail } from '../email.js';
 import { renderPasswordResetEmail, renderPasswordChangedEmail } from '../emailTemplates.js';
 import { renderErrorPage } from '../views.js';
 import { passwordComplexityOk } from './security.js';
-import { clientKeySet } from '../clientKeys.js';
 import {
   issueResetToken, getResetToken, bumpResetAttempts, consumeResetToken,
   reserveResetSend, releaseResetSend,
@@ -40,31 +40,8 @@ const siteName = async () => (await getSetting('site_name', 'DreamSSO'))!;
 const portalUrl = async () => (await getSetting('account_portal_url', config.accountPortalUrl))!;
 const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
 
-export async function isPortalAssertion(body: Record<string, unknown>): Promise<boolean> {
-  if (
-    body.client_assertion_type !== 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer' ||
-    typeof body.client_assertion !== 'string'
-  ) {
-    return false;
-  }
-  const { rows } = await pool.query(
-    'SELECT client_id, jwks, jwks_uri, disabled_at FROM oauth_clients WHERE client_id = $1',
-    [config.accountClientId],
-  );
-  const client = rows[0];
-  if (!client || client.disabled_at) return false;
-  const keySet = clientKeySet(client, { operation: 'reset' });
-  if (!keySet) return false;
-  try {
-    await jwtVerify(body.client_assertion, keySet, {
-      issuer: client.client_id,
-      subject: client.client_id,
-      audience: [config.issuer, `${config.issuer}/token`],
-    });
-    return true;
-  } catch {
-    return false;
-  }
+export function isPortalAssertion(body: Record<string, unknown>, operation: AssertionOperation): Promise<boolean> {
+  return assertedPortal(body, operation);
 }
 
 // Same identifier rules as the portal's form (defense in depth): a bare
@@ -106,7 +83,7 @@ async function liveIdentity(sub: string): Promise<Identity | null> {
 // authed, never public. Turnstile is enabled exactly when both keys are set.
 resetRouter.post('/internal/settings/turnstile', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
   const [siteKey, secret, gateJwkRaw] = await Promise.all([
     getSetting('turnstile_site_key'),
     getSecretSetting('turnstile_secret_key'),
@@ -132,7 +109,7 @@ resetRouter.post('/internal/settings/turnstile', async (req: Request, res: Respo
 // and without it a misconfigured mailer would silently 204 forever.
 resetRouter.post('/internal/reset/request', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
 
   const identifier = qstr(body.identifier).trim();
   if (!identifierOk(identifier)) return res.status(422).json({ error: 'invalid_identifier' });
@@ -170,7 +147,7 @@ resetRouter.post('/internal/reset/request', async (req: Request, res: Response) 
 // demand a strong-factor challenge?
 resetRouter.post('/internal/reset/validate', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
 
   const rec = await getResetToken(qstr(body.token));
   const identity = rec ? await liveIdentity(rec.sub) : null;
@@ -182,7 +159,7 @@ resetRouter.post('/internal/reset/validate', async (req: Request, res: Response)
 // reset's passkey step; the challenge lives in Redis keyed by the token.
 resetRouter.post('/internal/reset/passkey-options', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
 
   const rec = await getResetToken(qstr(body.token));
   const identity = rec ? await liveIdentity(rec.sub) : null;
@@ -201,7 +178,7 @@ resetRouter.post('/internal/reset/passkey-options', async (req: Request, res: Re
 // notifies by email, and mints the one-time login ticket for the SSO hop.
 resetRouter.post('/internal/reset/confirm', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
 
   const rec = await getResetToken(qstr(body.token));
   const identity = rec ? await liveIdentity(rec.sub) : null;
@@ -248,19 +225,11 @@ resetRouter.post('/internal/reset/confirm', async (req: Request, res: Response) 
   }
 
   const hash = await argon2.hash(password, { type: argon2.argon2id });
-  await pool.query(
-    `UPDATE identities SET password_hash = $2, password_changed_at = now() WHERE sub = $1`,
-    [identity.sub, hash],
-  );
+  await withSessionRevocation(async db => {
+    await db.query('UPDATE identities SET password_hash=$2,password_changed_at=now() WHERE sub=$1', [identity.sub, hash]);
+    await revokeSessions(db, { subject: identity.sub });
+  });
   await consumeResetToken(rec);
-
-  // Every pre-reset session dies — whoever held them no longer knows the
-  // password. Scoped fan-out per session, same as the Devices pane.
-  const { rows: revoked } = await pool.query<{ sid: string; clients: string[] | null }>(
-    `DELETE FROM sessions WHERE user_sub = $1 RETURNING sid, clients`,
-    [identity.sub],
-  );
-  await Promise.allSettled(revoked.map((r) => fanOutLogout(identity.sub, r.sid, r.clients ?? [])));
 
   // Best-effort notification — never blocks the reset.
   void (async () => {

@@ -3,7 +3,7 @@ import { pool } from '../db.js';
 import { config } from '../config.js';
 import { requireScope, type AuthedRequest } from '../resourceAuth.js';
 import { requirePerm } from '../rbac/index.js';
-import { fanOutLogout } from '../oidc/backchannel.js';
+import { revokeSessionSet } from '../oidc/backchannel.js';
 import { getSessionWindows, hoursAgo } from '../oidc/sessions.js';
 import { parseDevice } from '../deviceName.js';
 
@@ -85,12 +85,7 @@ devicesRouter.delete('/account/sessions/:sid', scoped, requirePerm('profile.secu
   if (!UUID_RE.test(sid)) return res.status(404).json({ error: 'not_found' });
   // Ownership is enforced in the WHERE clause (user_sub = caller) — a foreign sid
   // returns no row, indistinguishable from a missing one.
-  const { rows } = await pool.query<{ clients: string[] }>(
-    `DELETE FROM sessions WHERE sid = $1 AND user_sub = $2 RETURNING clients`,
-    [sid, sub],
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  await fanOutLogout(sub, sid, rows[0].clients ?? []);
+  if (!(await revokeSessionSet({ subject: sub, sid }))) return res.status(404).json({ error: 'not_found' });
   res.status(204).end();
 });
 
@@ -100,10 +95,6 @@ devicesRouter.post('/account/sessions/terminate-others', scoped, requirePerm('pr
   const sub = req.auth!.sub;
   const keep = String((req.body ?? {}).keep_sid ?? '');
   if (!UUID_RE.test(keep)) return res.status(400).json({ error: 'invalid_keep_sid' });
-  const { rows } = await pool.query<{ sid: string; clients: string[] }>(
-    `DELETE FROM sessions WHERE user_sub = $1 AND sid <> $2 RETURNING sid, clients`,
-    [sub, keep],
-  );
-  await Promise.allSettled(rows.map((r) => fanOutLogout(sub, r.sid, r.clients ?? [])));
+  await revokeSessionSet({ subject: sub, exceptSid: keep });
   res.status(204).end();
 });

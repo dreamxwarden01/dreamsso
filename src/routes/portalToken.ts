@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { config } from '../config.js';
 import { mintAccessToken } from '../oidc/tokens.js';
 import { loadSessionBySid } from '../oidc/sessions.js';
-import { isPortalAssertion } from './reset.js';
+import { assertedPortal } from '../oidc/clientAssertion.js';
 
 // Session-bound access-token renewal for the account portal's BFF. The BFF's
 // tokens live 15 minutes; instead of bouncing the SPA through /authorize every
@@ -15,7 +15,7 @@ export const portalTokenRouter = Router();
 
 portalTokenRouter.post('/internal/token/renew', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await assertedPortal(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
 
   const sid = typeof body.sid === 'string' ? body.sid : '';
   const sub = typeof body.sub === 'string' ? body.sub : '';
@@ -27,7 +27,7 @@ portalTokenRouter.post('/internal/token/renew', async (req: Request, res: Respon
   if (!sess || sess.userSub !== sub) return res.status(401).json({ error: 'session_gone' });
 
   const access_token = await mintAccessToken({
-    sub, clientId: config.accountClientId, scope: 'openid profile email',
+    sub, clientId: config.accountClientId, scope: 'openid profile email', sid: sess.sid,
   });
   res.json({ access_token, token_type: 'Bearer', expires_in: 900 });
 });

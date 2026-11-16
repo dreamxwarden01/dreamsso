@@ -31,6 +31,9 @@ against.
   `/account/*` resource API. These resources require a token issued to the configured account
   client; other RPs continue to use `/userinfo` for profile claims. Registered scope limits apply
   during authorization and code exchange.
+- **Session-bound access tokens.** Account resources and `/userinfo` check the current identity,
+  client and original SSO session on every request. Logout invalidates that session's bearer
+  access; inactive accounts and disabled clients are denied even before token expiry.
 - **The account portal is a thin BFF** — a Redis session cache plus an HTTP proxy to the SSO. It holds
   no database and no key-encryption key; its only persistent state is a few local files.
 - **Step-up MFA** (TOTP / passkey) is tiered and enforced server-side per surface; sensitive
@@ -76,19 +79,36 @@ event ID and payload while refreshing the signed envelope.
 Receivers acknowledge processed or duplicate batches with exactly `204 No Content`.
 Other responses, including `200` HTML from an intermediary, remain retryable failures.
 
-`account.roles_change` carries `sub`, `role_id`, `authority_epoch` and
-`authority_revision`. The revision is a decimal string; receivers track it per
+`account.roles_change` carries `sub`, `role_id`, `authority_epoch`,
+`authority_revision` and the current `account_status`. Status changes advance the
+same authority revision even when the role stays unchanged. The revision is a decimal string; receivers track it per
 subject within its epoch. ID tokens carry the corresponding `app_role_epoch` and
 `app_role_revision` claims. Signed access-state queries return the same metadata
 in response headers without changing the JSON body. See the
 [service-to-service API](docs/security/openapi-sso-s2s.yaml).
 
-Upgrade the SSO schema and server before upgrading relying parties. Preserve
+Initial adoption of versioned catalogs requires the SSO schema first. For the
+account-status extension, update receiving applications before enabling the new
+publisher. Update client-assertion issuers before enforcing signed operation claims. Preserve
 catalog and authority metadata with database backups; a foreign epoch requires
 explicit recovery. The migration requests a fresh catalog and republishes current
 roles during reconciliation. It does not reconstruct previously lost history.
 After receivers adopt versioned authority, rolling back the SSO alone can prevent
 sign-in; coordinate rollback across the identity provider and its relying parties.
+
+## Session revocation and client assertions
+
+Session deletion and its logout outbox entries commit together. Receivers acknowledge
+logout only after effects complete and retain terminal SSO-session markers, so a late
+callback cannot reopen a revoked session. Normal local-session replacement remains
+separate. These revocation records belong with the application's session state in backups.
+
+Client assertions include `iss = sub = client_id`, integral `iat` and `exp` within a
+120-second lifetime, a fresh `jti`, and signed `method` / `path` claims matching the
+request. Existing issuer or token-endpoint audiences remain supported. A nonce is
+single-use across authentication endpoints; callers create a new assertion for each
+attempt. Key or replay-storage failures return an unavailable response rather than
+accepting the request.
 
 ## Security
 

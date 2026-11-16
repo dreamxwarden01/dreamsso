@@ -1,11 +1,10 @@
 import type { Request, Response } from 'express';
-import { jwtVerify, createLocalJWKSet, type JSONWebKeySet } from 'jose';
+import type { ResourceAuth } from '../accountResourceAuth.js';
 
 export interface UserinfoProfile { sub: string; username: string; display_name: string;
   email: string | null; email_verified: boolean; avatar: string | null }
 export interface UserinfoDependencies {
-  issuer(): string;
-  jwks(): Promise<JSONWebKeySet>;
+  verifyAccessToken(req: Request): Promise<ResourceAuth | null>;
   profile(sub: string | undefined): Promise<UserinfoProfile | undefined>;
 }
 
@@ -13,15 +12,13 @@ export interface UserinfoDependencies {
 export function createUserinfoHandler(deps: UserinfoDependencies) {
   return async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
-    const match = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
-    if (!match) return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'invalid_token' });
     try {
-      const { payload } = await jwtVerify(match[1], createLocalJWKSet(await deps.jwks()), {
-        issuer: deps.issuer(), audience: deps.issuer(),
-      });
-      const profile = await deps.profile(payload.sub);
+      const auth = await deps.verifyAccessToken(req);
+      if (!auth) return res.status(401).set('WWW-Authenticate', 'Bearer error="invalid_token"').json({ error: 'invalid_token' });
+      if (auth.denied) return res.status(403).json({ error: auth.denied });
+      const profile = await deps.profile(auth.sub);
       if (!profile) return res.status(401).set('WWW-Authenticate', 'Bearer error="invalid_token"').json({ error: 'invalid_token' });
-      const scopes = String(payload.scope ?? '').split(' ');
+      const scopes = auth.scopes;
       const out: Record<string, unknown> = { sub: profile.sub };
       if (scopes.includes('profile')) {
         out.name = profile.display_name;out.preferred_username = profile.username;
@@ -30,7 +27,7 @@ export function createUserinfoHandler(deps: UserinfoDependencies) {
       if (scopes.includes('email')) { out.email = profile.email;out.email_verified = profile.email_verified; }
       return res.json(out);
     } catch {
-      return res.status(401).set('WWW-Authenticate', 'Bearer error="invalid_token"').json({ error: 'invalid_token' });
+      return res.status(503).json({ error: 'authentication_unavailable' });
     }
   };
 }

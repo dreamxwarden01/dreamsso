@@ -33,7 +33,7 @@ const key = await importJWK(privJwk, 'EdDSA');
 
 async function assertion(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({})
+  return new SignJWT({ method: 'POST', path: '/internal/session-activity' })
     .setProtectedHeader({ alg: 'EdDSA', kid: privJwk.kid })
     .setIssuer(CLIENT).setSubject(CLIENT).setAudience(SSO)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID())

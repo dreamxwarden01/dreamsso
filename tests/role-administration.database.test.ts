@@ -63,6 +63,7 @@ test('role administration preserves authority ceilings and atomic delivery in is
       [ids.personalNull, ids.personalFixed, ids.elevated]);
     // Seed the role ledger; upgrade-request delivery is covered by migration tests.
     await database.query(migration);
+    await database.query("UPDATE app_role_effective SET account_status='active'");
     await database.query("DELETE FROM event_outbox WHERE kind='roles.sync_request' AND payload->>'reason'='role_event_consistency_upgrade'");
   };
   try {

@@ -94,7 +94,7 @@ avatarRouter.get('/avatar/:file', async (req: Request, res: Response) => {
 
 avatarRouter.post('/internal/avatar', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await assertedClient(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await assertedClient(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
   const buf = await readAvatar(String(body.file ?? ''));
   if (!buf) return res.status(404).json({ error: 'not_found' });
   res.setHeader('Cache-Control', 'no-store'); // apps persist it themselves

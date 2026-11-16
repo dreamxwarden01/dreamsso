@@ -1,50 +1,27 @@
-import { jwtVerify } from 'jose';
 import { pool } from '../db.js';
+import { redis } from '../redis.js';
 import { config } from '../config.js';
-import { clientKeySet } from '../clientKeys.js';
+import { clientKeySet, type ClientKeyRegistration } from '../clientKeys.js';
+import { createClientAssertionVerifier, type AssertionClient, type AssertionOperation } from './clientAssertionValidation.js';
 
-// Generic inbound client-assertion check (any enabled client, not just the
-// portal): the assertion's iss names the client; verified against its registered
-// keys (jwks_uri preferred, inline jwks fallback — see clientKeySet).
-//
-// Lifted out of routes/avatar.ts so the /internal/* endpoints share ONE verifier
-// instead of accumulating copies. The portal-pinned sibling (isPortalAssertion in
-// routes/reset.ts) stays separate — it deliberately ignores the assertion's iss
-// and hard-pins the account client.
-//
-// Returns the verified client_id, or null for EVERY failure mode (wrong assertion
-// type, unparseable, unknown/disabled client, no registered key, bad signature or
-// claims). Never throws, never distinguishes causes — callers answer 401.
-export async function assertedClient(body: Record<string, unknown>): Promise<string | null> {
-  if (
-    body.client_assertion_type !== 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer' ||
-    typeof body.client_assertion !== 'string'
-  ) {
-    return null;
-  }
-  let iss = '';
-  try {
-    iss = String(JSON.parse(Buffer.from(body.client_assertion.split('.')[1], 'base64url').toString()).iss ?? '');
-  } catch {
-    return null;
-  }
-  if (!iss) return null;
-  const { rows } = await pool.query(
-    'SELECT client_id, jwks, jwks_uri, disabled_at FROM oauth_clients WHERE client_id = $1',
-    [iss],
-  );
-  const client = rows[0];
-  if (!client || client.disabled_at) return null;
-  const keySet = clientKeySet(client, { operation: 'client_assertion' });
-  if (!keySet) return null;
-  try {
-    await jwtVerify(body.client_assertion, keySet, {
-      issuer: client.client_id,
-      subject: client.client_id,
-      audience: [config.issuer, `${config.issuer}/token`],
-    });
-    return client.client_id;
-  } catch {
-    return null;
-  }
+type RegisteredClient = AssertionClient & ClientKeyRegistration;
+const verify = createClientAssertionVerifier<RegisteredClient>({
+  issuer: () => config.issuer,
+  loadClient: async clientId => {
+    const { rows } = await pool.query<RegisteredClient>(
+      'SELECT client_id, jwks, jwks_uri, disabled_at FROM oauth_clients WHERE client_id = $1', [clientId]);
+    return rows[0] ?? null;
+  },
+  keySet: (client, operation) => clientKeySet(client, { operation: operation.path === '/token' ? 'token' : 'client_assertion' }),
+  claimNonce: async (key, ttl) => (await redis.set(key, '1', 'EX', ttl, 'NX')) === 'OK',
+});
+
+/** Authentication failures return null. Storage/transport outages are typed and
+ * must be surfaced as sanitized 503 by the HTTP boundary, never invalid-client.
+ */
+export function assertedClient(body: Record<string, unknown>, operation: AssertionOperation): Promise<string | null> {
+  return verify(body, operation);
+}
+export async function assertedPortal(body: Record<string, unknown>, operation: AssertionOperation): Promise<boolean> {
+  return (await verify(body, operation, config.accountClientId)) !== null;
 }

@@ -15,7 +15,8 @@ export type { OutboundEvent } from './events/outboxStore.js';
 // PostgreSQL owns pending events and retry outcomes. Redis is read only during
 // legacy import; all new enqueues are durable before their caller returns.
 // Domain mutations need insertEvents on their own transaction. This standalone
-// wrapper does not make unrelated logout/avatar/settings mutations atomic.
+// wrapper does not make unrelated avatar/settings mutations atomic. Logout uses
+// the caller-owned sessionRevocation transaction instead.
 export async function enqueueEvents(clientId: string, events: OutboundEvent[]): Promise<void> {
   const db = await pool.connect();
   try {

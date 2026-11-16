@@ -158,7 +158,7 @@ ok(r.status === 404, '7a. wrong suffix -> 404 (name is the capability)');
   const priv = ((r) => (r.keys?.[0] ?? r))(JSON.parse(fs.readFileSync(path.join(process.cwd(), '.videosite-client-key.json'), 'utf8')));
   const key = await importJWK(priv, 'EdDSA');
   const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
+  const assertion = await new SignJWT({ method: 'POST', path: '/internal/avatar' })
     .setProtectedHeader({ alg: 'EdDSA', kid: priv.kid })
     .setIssuer('videosite').setSubject('videosite').setAudience(SSO)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID())

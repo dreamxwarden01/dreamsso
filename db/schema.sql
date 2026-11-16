@@ -398,6 +398,8 @@ CREATE TABLE app_role_effective (
     user_sub uuid NOT NULL REFERENCES identities(sub) ON DELETE CASCADE,
     role_id integer,
     managed boolean NOT NULL,
+    account_status text CONSTRAINT app_role_effective_account_status_check
+      CHECK(account_status IS NULL OR account_status IN('active','disabled','locked','deleted')),
     authority_revision bigint NOT NULL DEFAULT 0 CHECK(authority_revision>=0),
     PRIMARY KEY(client_id,user_sub)
 );

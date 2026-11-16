@@ -88,7 +88,7 @@ export async function redeemAuthorizationCode(input: CodeRedemptionInput, deps: 
     await db.query('UPDATE sessions SET clients=array_append(clients,$2) WHERE sid=$1 AND NOT ($2=ANY(clients))', [ac.sid, input.clientId]);
     const id_token = await prepared.mintIdToken({ sub: ac.userSub, clientId: input.clientId, nonce: ac.nonce,
       acr: ac.acr, amr: ac.amr, authTime: ac.authTime, sid: ac.sid, extra });
-    const access_token = await prepared.mintAccessToken({ sub: ac.userSub, clientId: input.clientId, scope: ac.scope });
+    const access_token = await prepared.mintAccessToken({ sub: ac.userSub, clientId: input.clientId, scope: ac.scope, sid: ac.sid });
     await db.query('COMMIT');
     return { access_token, token_type: 'Bearer', expires_in: 900, id_token, scope: ac.scope };
   } catch (error) {

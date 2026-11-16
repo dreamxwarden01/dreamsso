@@ -55,7 +55,7 @@ app.get('/callback', async (req, res) => {
   if (!req.query.code || req.query.state !== flow.state) return res.status(400).send(page('<h1>bad state</h1>'));
 
   const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
+  const assertion = await new SignJWT({ method: 'POST', path: '/token' })
     .setProtectedHeader({ alg: 'EdDSA', kid: privJwk.kid })
     .setIssuer(CLIENT_ID).setSubject(CLIENT_ID).setAudience(ISSUER)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID())

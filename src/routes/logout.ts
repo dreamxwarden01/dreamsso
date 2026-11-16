@@ -1,8 +1,7 @@
 import crypto from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
-import { pool } from '../db.js';
 import { loadSession, SESSION_COOKIE } from '../oidc/sessions.js';
-import { fanOutLogout } from '../oidc/backchannel.js';
+import { revokeSessionSet } from '../oidc/backchannel.js';
 import { renderSignedOutPage } from '../views.js';
 import { getSetting } from '../settings.js';
 
@@ -15,16 +14,10 @@ export const logoutRouter = Router();
 
 logoutRouter.get('/logout', async (req: Request, res: Response) => {
   const session = await loadSession(req);
-  res.clearCookie(SESSION_COOKIE, { path: '/' });
   if (session) {
-    // Delete-and-capture: grab the session's app set in the same statement that
-    // removes the row, then fan out only to those apps (see fanOutLogout).
-    const { rows } = await pool.query<{ clients: string[] }>(
-      'DELETE FROM sessions WHERE sid = $1 RETURNING clients',
-      [session.sid],
-    );
-    await fanOutLogout(session.userSub, session.sid, rows[0]?.clients ?? []);
+    await revokeSessionSet({ subject: session.userSub, sid: session.sid });
   }
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
   const nonce = crypto.randomBytes(16).toString('base64');
   res.setHeader('Cache-Control', 'no-store');
   // img-src 'self': the shared auth-card style paints the bloom background from

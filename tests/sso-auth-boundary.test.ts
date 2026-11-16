@@ -7,12 +7,13 @@ import { createUserinfoHandler } from '../src/oidc/userinfo.js';
 import { scopesAllowed } from '../src/oidc/scopes.js';
 
 const issuer = 'https://sso.example.invalid', sub = '11111111-1111-4111-8111-111111111111';
+const sid = '22222222-2222-4222-8222-222222222222';
 const keys = await generateKeyPair('EdDSA'), jwk = await exportJWK(keys.publicKey);jwk.kid = 'generated-fixture';
 const jwks = { keys: [jwk] };
-const auth = createAccountResourceAuth({ issuer: () => issuer, accountClientId: () => 'account', jwks: async () => jwks });
+const auth = createAccountResourceAuth({ issuer: () => issuer, accountClientId: () => 'account', jwks: async () => jwks, readState: async () => 'active' });
 async function sign(client: string | null, options: { scope?: string; typ?: string; expired?: boolean } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ scope: options.scope ?? 'openid profile email', ...(client === null ? {} : { client_id: client }) })
+  return new SignJWT({ sid, scope: options.scope ?? 'openid profile email', ...(client === null ? {} : { client_id: client }) })
     .setProtectedHeader({ alg: 'EdDSA', typ: options.typ ?? 'at+jwt', kid: jwk.kid }).setIssuer(issuer)
     .setAudience(issuer).setSubject(sub).setIssuedAt(now - 60).setExpirationTime(now + (options.expired ? -1 : 600)).sign(keys.privateKey);
 }
@@ -34,7 +35,7 @@ test('ordinary RP access token remains valid at userinfo but cannot cross Accoun
   const token = await sign('ordinary-rp');
   const denied = await account(token);assert.equal(denied.res.statusCode, 403);assert.equal(denied.next, false);
   assert.deepEqual(denied.res.body, { error: 'client_not_allowed' });
-  const profile = createUserinfoHandler({ issuer: () => issuer, jwks: async () => jwks,
+  const profile = createUserinfoHandler({ verifyAccessToken: auth.verifyAccessToken,
     profile: async subject => { assert.equal(subject, sub);return { sub, username: 'fixture', display_name: 'Fixture',
       email: 'fixture@example.invalid', email_verified: true, avatar: null }; } });
   const res = response();await profile({ headers: { authorization: 'Bearer ' + token } } as Request, res as unknown as Response);
@@ -43,8 +44,8 @@ test('ordinary RP access token remains valid at userinfo but cannot cross Accoun
 
 test('current Account token shape remains compatible; missing grant and scope are authorization denials', async () => {
   const admitted = await account(await sign('account'));assert.equal(admitted.next, true);assert.equal(admitted.req.auth?.clientId, 'account');
-  const oldShape = await account(await sign('account'));assert.equal(oldShape.next, true); // no new SID claim required
-  const missingClient = await account(await sign(null));assert.equal(missingClient.res.statusCode, 403);
+  // Current tokens retain the resource client grant and now bind their original SID.
+  const missingClient = await account(await sign(null));assert.equal(missingClient.res.statusCode, 401);
   const scope = await account(await sign('account', { scope: 'openid email' }));assert.equal(scope.res.statusCode, 403);assert.deepEqual(scope.res.body, { error: 'insufficient_scope', error_description: 'profile scope required' });
   assert.equal(accountResourceError({ sub, scopes: ['profile'], clientId: 'ordinary-rp' }, 'profile', 'account'), 'client_not_allowed');
 });
@@ -95,12 +96,12 @@ test('actual portal renewal route and minter issue tokens accepted by the config
     } }) },
     '../config.js': { config }, '../oidc/tokens.js': actualTokens,
     '../oidc/sessions.js': { loadSessionBySid: async (sid: string) => {
-      assert.equal(sid, 'synthetic-owned-session');return live ? { userSub: sub } : null;
+      assert.equal(sid, '22222222-2222-4222-8222-222222222222');return live ? { userSub: sub, sid } : null;
     } },
-    './reset.js': { isPortalAssertion: async () => validClient },
+    '../oidc/clientAssertion.js': { assertedPortal: async () => validClient },
   });
   assert.ok(handler);
-  const req = { body: { sid: 'synthetic-owned-session', sub } } as Request;
+  const req = { method: 'POST', path: '/internal/token/renew', body: { sid, sub } } as Request;
   const renewed = response();await handler(req, renewed as unknown as Response);
   assert.equal(renewed.statusCode, 200);
   const body = renewed.body as { access_token: string; expires_in: number };
@@ -108,7 +109,7 @@ test('actual portal renewal route and minter issue tokens accepted by the config
   const verified = await jose.jwtVerify(body.access_token, jose.createLocalJWKSet(jwks), { issuer, audience: issuer, typ: 'at+jwt' });
   assert.equal(verified.payload.client_id, config.accountClientId);
   assert.equal(verified.payload.exp! - verified.payload.iat!, 900);
-  const gate = createAccountResourceAuth({ issuer: () => issuer, accountClientId: () => config.accountClientId, jwks: async () => jwks });
+  const gate = createAccountResourceAuth({ issuer: () => issuer, accountClientId: () => config.accountClientId, jwks: async () => jwks, readState: async () => 'active' });
   let next = false;const res = response();
   await gate.requireScope('profile')({ headers: { authorization: 'Bearer ' + body.access_token } } as AuthedRequest,
     res as unknown as Response, () => { next = true; });
@@ -116,7 +117,7 @@ test('actual portal renewal route and minter issue tokens accepted by the config
 
   for (const state of ['invalid-client', 'dead-session', 'wrong-owner'] as const) {
     validClient = state !== 'invalid-client';live = state !== 'dead-session';
-    const denied = response();await handler({ body: { sid: 'synthetic-owned-session', sub: state === 'wrong-owner' ? 'another-subject' : sub } } as Request,
+    const denied = response();await handler({ body: { sid, sub: state === 'wrong-owner' ? 'another-subject' : sub } } as Request,
       denied as unknown as Response);
     assert.equal(denied.statusCode, 401);assert.equal(mintCalls, 1);
   }

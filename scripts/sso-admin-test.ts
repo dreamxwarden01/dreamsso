@@ -219,7 +219,7 @@ async function runFlow(clientId: string) {
   rr = await answerKmsi(SSO, rr, t, cs); // "Stay signed in?" -> code
   const code = new URL(rr.headers.get('location')!).searchParams.get('code')!;
   const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
+  const assertion = await new SignJWT({ method: 'POST', path: '/token' })
     .setProtectedHeader({ alg: 'EdDSA', kid: pubJwk.kid as string })
     .setIssuer(clientId).setSubject(clientId).setAudience(SSO)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(privateKey);

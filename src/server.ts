@@ -1,6 +1,7 @@
 import {ServiceLifecycle,installShutdownSignals,safeLifecycleError} from './lifecycle.js';
 import {closeS2SFetch,destroyS2SFetch} from './s2sFetch.js';
-import express from 'express';
+import express, { type ErrorRequestHandler } from 'express';
+import { ClientAssertionUnavailable } from './oidc/clientAssertionValidation.js';
 import cookieParser from 'cookie-parser';
 import { config } from './config.js';
 import { getSetting, hasSetting } from './settings.js';
@@ -139,6 +140,15 @@ app.get('/healthz', async (_req, res) => {
     res.status(503).json({ status: 'degraded', error: (err as Error).message });
   }
 });
+
+// A replay-store/key-service outage is unavailable authentication, not a bad
+// credential. Keep the response fixed and leave unrelated errors to Express.
+const assertionErrors: ErrorRequestHandler = (error, _req, res, next) => {
+  if (error instanceof ClientAssertionUnavailable) {
+    res.status(503).set('Cache-Control', 'no-store').json({ error: 'client_auth_unavailable' });
+  } else next(error);
+};
+app.use(assertionErrors);
 
 // Catch-all 404 (after every router). Browsers get the styled card; API/other
 // clients get JSON. no-store — it's path-specific, not a cacheable asset.

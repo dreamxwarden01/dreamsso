@@ -31,10 +31,10 @@ export async function mintIdToken(p: {
     .sign(privateKey);
 }
 
-export async function mintAccessToken(p: { sub: string; clientId: string; scope: string }, signingKey?: Awaited<ReturnType<typeof getSigningKey>>): Promise<string> {
+export async function mintAccessToken(p: { sub: string; clientId: string; scope: string; sid: string }, signingKey?: Awaited<ReturnType<typeof getSigningKey>>): Promise<string> {
   const { kid, privateKey } = signingKey ?? await getSigningKey();
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ scope: p.scope, client_id: p.clientId })
+  return new SignJWT({ scope: p.scope, client_id: p.clientId, sid: p.sid })
     .setProtectedHeader({ alg: 'EdDSA', kid, typ: 'at+jwt' })
     .setIssuer(config.issuer)
     .setSubject(p.sub)

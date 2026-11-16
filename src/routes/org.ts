@@ -13,9 +13,10 @@ import { isStepupFresh } from '../oidc/sessions.js';
 import { acceptedStepupMethods, stepupSatisfies } from '../oidc/stepupPolicy.js';
 import { getSetting, invalidateSettingCache } from '../settings.js';
 import { audit, actorLabel } from '../audit.js';
-import { fanOutLogout } from '../oidc/backchannel.js';
+import { revokeSessionSet, revokeSessions, withSessionRevocation } from '../oidc/backchannel.js';
 import { enqueueEvents, kickDrain } from '../events.js';
 import { withRoleTransaction } from '../rbac/roleChanges.js';
+import { changeAccountStatus } from '../rbac/accountStatus.js';
 import { assertOrgRoleProof } from '../rbac/orgProof.js';
 import { applyUserAccess, applyRoleAccess, createOrgRole, patchOrgRole, deleteOrgRole,
   setDefaultOrgRole, createOrgUser, RoleAccessError } from '../rbac/roleAdministration.js';
@@ -248,14 +249,8 @@ async function editableTarget(req: AuthedRequest, res: Response): Promise<{ a: A
 }
 
 async function revokeAllSessions(sub: string): Promise<number> {
-  const { rows } = await pool.query<{ sid: string; clients: string[] | null }>(
-    'DELETE FROM sessions WHERE user_sub = $1 RETURNING sid, clients',
-    [sub],
-  );
-  await Promise.allSettled(rows.map((r) => fanOutLogout(sub, r.sid, r.clients ?? [])));
-  return rows.length;
+  return revokeSessionSet({ subject: sub });
 }
-
 
 // --- users -----------------------------------------------------------------
 
@@ -513,8 +508,10 @@ orgRouter.post('/account/org/users/:sub/password', scoped, requirePerm('org.user
       return res.status(422).json({ error: 'weak_password' });
     }
     const hash = await argon2.hash(password, { type: argon2.argon2id });
-    await pool.query('UPDATE identities SET password_hash = $2, password_changed_at = now() WHERE sub = $1', [t.sub, hash]);
-    const revoked = await revokeAllSessions(t.sub);
+    const revoked = await withSessionRevocation(async db => {
+      await db.query('UPDATE identities SET password_hash=$2,password_changed_at=now() WHERE sub=$1', [t.sub, hash]);
+      return revokeSessions(db, { subject: t.sub });
+    });
     audit({ actorSub: a.sub, actorLabel: a.label, targetSub: t.sub, targetLabel: targetLabel(t),
             action: 'user.password_set', detail: { sessions_revoked: revoked } });
     if (t.email) {
@@ -665,12 +662,9 @@ orgRouter.delete('/account/org/users/:sub/sessions/:sid', scoped, requirePerm('o
     const ctx = await editableTarget(req, res);
     if (!ctx) return;
     const { a, t } = ctx;
-    const { rows } = await pool.query(
-      'DELETE FROM sessions WHERE sid = $1 AND user_sub = $2 RETURNING clients',
-      [String(req.params.sid), t.sub],
-    );
-    if (!rows.length) return res.status(404).json({ error: 'not_found' });
-    await fanOutLogout(t.sub, String(req.params.sid), rows[0].clients ?? []);
+    if (!(await revokeSessionSet({ subject: t.sub, sid: String(req.params.sid) }))) {
+      return res.status(404).json({ error: 'not_found' });
+    }
     audit({ actorSub: a.sub, actorLabel: a.label, targetSub: t.sub, targetLabel: targetLabel(t), action: 'user.session_terminate' });
     res.status(204).end();
   });
@@ -691,8 +685,14 @@ orgRouter.post('/account/org/users/:sub/suspend', scoped, requirePerm('org.users
     const ctx = await editableTarget(req, res);
     if (!ctx) return;
     const { a, t } = ctx;
-    await pool.query(`UPDATE identities SET status = 'disabled' WHERE sub = $1`, [t.sub]);
-    const n = await revokeAllSessions(t.sub);
+    const n = await withRoleTransaction(async db => {
+      let revoked = 0;
+      await changeAccountStatus(db, t.sub, 'disabled', async connection => {
+        revoked = await revokeSessions(connection, { subject: t.sub });
+      });
+      return revoked;
+    });
+    kickDrain();
     audit({ actorSub: a.sub, actorLabel: a.label, targetSub: t.sub, targetLabel: targetLabel(t),
             action: 'user.suspend', detail: { sessions_revoked: n } });
     res.status(204).end();
@@ -703,7 +703,8 @@ orgRouter.post('/account/org/users/:sub/reactivate', scoped, requirePerm('org.us
     const ctx = await editableTarget(req, res);
     if (!ctx) return;
     const { a, t } = ctx;
-    await pool.query(`UPDATE identities SET status = 'active' WHERE sub = $1`, [t.sub]);
+    await withRoleTransaction(db => changeAccountStatus(db, t.sub, 'active'));
+    kickDrain();
     audit({ actorSub: a.sub, actorLabel: a.label, targetSub: t.sub, targetLabel: targetLabel(t), action: 'user.reactivate' });
     res.status(204).end();
   });

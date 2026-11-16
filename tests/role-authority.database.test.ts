@@ -35,6 +35,9 @@ test('role authority snapshots remain coherent across concurrent PostgreSQL muta
     await database.query("INSERT INTO org_role_app_defaults(role_slug,client_id,app_role_id) VALUES('member','managed',3)");
     await database.query("INSERT INTO user_app_role_overrides(user_sub,client_id,app_role_id) VALUES($1,'managed',NULL),($2,'managed',999)", [deniedUser, unknownRoleUser]);
     await database.query(await readFile(new URL('../db/migrations/001-role-event-consistency.sql', import.meta.url), 'utf8'));
+    // This role-only fixture starts after a known active-status baseline. The
+    // separate account-status suite covers legacy NULL -> current publication.
+    await database.query("UPDATE app_role_effective SET account_status='active'");
     const initial = await snapshot();assert.ok(initial.authority);
     const epoch = initial.authority.epoch;
 

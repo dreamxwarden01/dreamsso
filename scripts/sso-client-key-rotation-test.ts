@@ -52,7 +52,7 @@ const setCookie = (r: Response, n: string) => {
 async function probeAssertion(jwk: JWK & { kid: string }): Promise<number> {
   const key = await importJWK(jwk, 'EdDSA');
   const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({})
+  const assertion = await new SignJWT({ method: 'POST', path: '/internal/avatar' })
     .setProtectedHeader({ alg: 'EdDSA', kid: jwk.kid })
     .setIssuer('videosite').setSubject('videosite').setAudience(SSO)
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID())

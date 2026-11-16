@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
+import type pg from 'pg';
 import type { Request, Response } from 'express';
 import { pool } from '../db.js';
 import { getSetting } from '../settings.js';
-import { fanOutLogout } from './backchannel.js';
+import { readSessionWindows, resolveSessionWindows } from './sessionWindows.js';
+import { revokeSessionSet } from './backchannel.js';
 import { stepupStampFresh, stepupValidityMinutes } from './stepupRules.js';
 
 export const SESSION_COOKIE = 'sso_session';
@@ -15,24 +17,11 @@ const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest();
 // but the dynamic windows are the source of truth. Ranges: idle 1–2160 (90d),
 // absolute 1–8760 (1y), idle ≤ absolute (enforced at write; reads clamp
 // defensively). Defaults: 72h idle / 168h absolute.
-const clampHours = (v: string | null, fallback: number, maxRange: number) => {
-  const n = parseInt(v ?? '', 10);
-  return Number.isFinite(n) && n >= 1 && n <= maxRange ? n : fallback;
-};
-export async function getSessionWindows(): Promise<{ idleHours: number; maxHours: number; transientMaxHours: number }> {
-  const [idle, max, transient] = await Promise.all([
-    getSetting('session_idle_hours'),
-    getSetting('session_max_hours'),
-    getSetting('session_transient_max_hours'),
-  ]);
-  const maxHours = clampHours(max, 168, 8760);
-  return {
-    idleHours: Math.min(clampHours(idle, 72, 2160), maxHours),
-    maxHours,
-    // Absolute cap for TRANSIENT sessions (KMSI answered "No"/unanswered) —
-    // never longer than the persistent cap.
-    transientMaxHours: Math.min(clampHours(transient, 24, 8760), maxHours),
-  };
+export async function getSessionWindows(db?: Pick<pg.PoolClient, 'query'>): Promise<{ idleHours: number; maxHours: number; transientMaxHours: number }> {
+  if (db) return readSessionWindows(db);
+  return resolveSessionWindows(await Promise.all([
+    getSetting('session_idle_hours'), getSetting('session_max_hours'), getSetting('session_transient_max_hours'),
+  ]));
 }
 export const hoursAgo = (hours: number) => new Date(Date.now() - hours * 60 * 60 * 1000);
 
@@ -245,31 +234,14 @@ export async function loadSessionBySid(sid: string): Promise<ActiveSession | nul
   };
 }
 
-// DB backstop (videosite's cleanExpiredSessions): prune rows past either window
-// so the table and the Devices pane stay clean. Called hourly from server.ts.
-//
-// Expiry is a REVOCATION, not just bookkeeping: the RP sessions this session
-// spawned outlive it otherwise. Deleting the row silently used to strand them —
-// every other revocation path is sid-scoped (fanOutLogout over the row's
-// `clients`), so once the row is gone nothing can ever reach those RP sessions
-// again and they run out their own local clocks, unreachable by "sign out
-// everywhere" or an admin terminate. This is the last moment we still hold the
-// sid + clients needed to tell them, so we fan out logout before dropping the
-// rows (same DELETE ... RETURNING pattern as devices/security/reset).
+// Expired-session deletion and logout delivery intent commit together. Failure
+// retains the rows for a later sweep instead of silently losing RP revocation.
 export async function cleanExpiredSessions(): Promise<void> {
   try {
     const { idleHours, maxHours, transientMaxHours } = await getSessionWindows();
-    const { rows } = await pool.query<{ user_sub: string; sid: string; clients: string[] | null }>(
-      `DELETE FROM sessions
-        WHERE last_seen < $1
-           OR created_at < (CASE WHEN persistent THEN $2::timestamptz ELSE $3::timestamptz END)
-        RETURNING user_sub, sid, clients`,
-      [hoursAgo(idleHours), hoursAgo(maxHours), hoursAgo(transientMaxHours)],
-    );
-    // Enqueue-only (Redis zset + 2s debounce); never rejects. Clients that never
-    // touched the session aren't told, same scoping rule as every other caller.
-    await Promise.allSettled(rows.map((r) => fanOutLogout(r.user_sub, r.sid, r.clients ?? [])));
-  } catch (e) {
-    console.error('cleanExpiredSessions failed:', (e as Error).message);
+    await revokeSessionSet({ expired: { idleBefore: hoursAgo(idleHours),
+      persistentBefore: hoursAgo(maxHours), transientBefore: hoursAgo(transientMaxHours) } });
+  } catch {
+    console.error('cleanExpiredSessions failed: revocation_unavailable');
   }
 }

@@ -47,7 +47,7 @@ const invitationRequired = async () => (await getSetting('require_invitation_cod
 // POST /internal/register/start {email, code?}
 registerRouter.post('/internal/register/start', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
   if (!(await registrationEnabled())) return res.status(403).json({ error: 'registration_closed' });
 
   const email = qstr(body.email).trim();
@@ -115,7 +115,7 @@ registerRouter.post('/internal/register/start', async (req: Request, res: Respon
 // POST /internal/register/validate {email, token} — is the emailed link usable?
 registerRouter.post('/internal/register/validate', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
   if (!(await registrationEnabled())) return res.status(403).json({ error: 'registration_closed' });
   const email = qstr(body.email).trim();
   const pending = await validatePending(email, qstr(body.token));
@@ -131,7 +131,7 @@ registerRouter.post('/internal/register/validate', async (req: Request, res: Res
 // availability for the complete form. Token-gated: not a public oracle.
 registerRouter.post('/internal/register/check-username', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
   const email = qstr(body.email).trim();
   if (!(await validatePending(email, qstr(body.token)))) return res.status(422).json({ error: 'invalid_token' });
   const username = qstr(body.username).trim();
@@ -145,7 +145,7 @@ registerRouter.post('/internal/register/check-username', async (req: Request, re
 // POST /internal/register/complete {email, token, username, display_name, password}
 registerRouter.post('/internal/register/complete', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body))) return res.status(401).json({ error: 'invalid_client' });
+  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
   if (!(await registrationEnabled())) return res.status(403).json({ error: 'registration_closed' });
 
   const email = qstr(body.email).trim();

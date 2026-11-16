@@ -1,13 +1,17 @@
-import { enqueueEvents } from '../events.js';
+import type pg from 'pg';
+import { pool } from '../db.js';
+import { kickDrain } from '../events.js';
+import { revokeSessions, withRevocationTransaction, type SessionSelection } from './sessionRevocation.js';
 
-// Back-channel logout — now an event TYPE on the generic channel (see
-// src/events.ts) instead of a bespoke fan-out: enqueued per client, batched
-// into the signed envelope, delivered by the pump (2s debounce), retried by
-// the 60s sweep. Same signature as the old direct fan-out so every call site
-// (logout, devices terminate, password reset revoke-all) is unchanged; the
-// scoping rule also is: only the clients the session actually touched.
-export async function fanOutLogout(sub: string, sid: string, clients: string[]): Promise<void> {
-  await Promise.allSettled(
-    clients.map((c) => enqueueEvents(c, [{ type: 'logout', payload: { sub, sid } }])),
-  );
+export { revokeSessions } from './sessionRevocation.js';
+
+export async function withSessionRevocation<T>(work: (db: pg.PoolClient) => Promise<T>): Promise<T> {
+  const result = await withRevocationTransaction(pool, work);
+  // Delivery begins only after commit. A missed wakeup is recovered by the pump.
+  kickDrain();
+  return result;
+}
+
+export function revokeSessionSet(selection: SessionSelection): Promise<number> {
+  return withSessionRevocation(db => revokeSessions(db, selection));
 }

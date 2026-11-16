@@ -64,7 +64,7 @@ const ISSUER = 'https://sso-dev.dreamxwarden.ca';
 const priv = ((r) => (r.keys?.[0] ?? r))(JSON.parse(fs.readFileSync(new URL('../.videosite-client-key.json', import.meta.url))));
 const key = await importJWK(priv, 'EdDSA');
 const now = Math.floor(Date.now() / 1000);
-const assertion = await new SignJWT({})
+const assertion = await new SignJWT({ method: 'POST', path: '/token' })
   .setProtectedHeader({ alg: 'EdDSA', kid: priv.kid })
   .setIssuer(CLIENT).setSubject(CLIENT).setAudience(ISSUER)
   .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID())
