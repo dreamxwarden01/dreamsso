@@ -27,7 +27,9 @@ import { loginAuthOptions, verifyLoginAssertion } from '../webauthn.js';
 import { sendEmail } from '../email.js';
 import { renderPasswordResetEmail, renderPasswordChangedEmail } from '../emailTemplates.js';
 import { issueResetToken, resetTokenValidityMinutes } from '../passwordReset.js';
-import { generateInviteCode, voidInvite, emailReserved, CODE_RE } from '../registration.js';
+import { emailReserved } from '../registration.js';
+import { InvitationError, invalidateIneligibleInvitations, createInvitation, requestInvitationResend, revokeInvitation, readInvitation, listInvitations, lockInvitation, serializeInvitation } from '../invitations.js';
+import { queueInvitationMail } from '../invitationMail.js';
 import { passwordComplexityOk } from './security.js';
 import { pushAvatarChange } from './avatar.js';
 import { deleteAvatarFile } from '../avatars.js';
@@ -863,136 +865,56 @@ orgRouter.post('/account/org/roles/:slug/access', scoped, requireFreshStepup,
     String(req.params.slug ?? ''), (req.body ?? {}) as Record<string, unknown>)));
 
 // --- Invitation codes (registration) -----------------------------------
-// Live codes + consumed records in one list. Lifecycle (user design): consumed
-// rows are PERMANENT (used_by uuid -> username via join); voided rows are
-// deleted immediately; expired unused rows die in the hourly sweep.
-
-// GET /account/org/invites?limit=&offset= — guard-matrix list scope: only
-// codes whose creator is same-or-lower org level than the viewer (orphaned
-// creators visible). Voided/expired rows linger until their clear_at (24h).
-orgRouter.get('/account/org/invites', scoped, requirePerm('org.invites.view'), requireFreshStepup, async (req: AuthedRequest, res) => {
-  const a = await actorCtx(req);
-  const limit = Math.min(Math.max(parseInt(qstr(req.query.limit) || '25', 10) || 25, 1), 200);
-  const offset = Math.max(parseInt(qstr(req.query.offset) || '0', 10) || 0, 0);
-  const scopeWhere = `ic.created_by IS NULL OR ci.sub IS NULL OR COALESCE(cr.level, ${INF_LEVEL}) >= $1`;
-  const joins = `
-       FROM invitation_codes ic
-       LEFT JOIN identities ci ON ci.sub = ic.created_by AND ci.deleted_at IS NULL
-       LEFT JOIN user_org_roles cur ON cur.user_sub = ci.sub
-       LEFT JOIN org_roles cr ON cr.slug = cur.org_role_slug`;
-  const [{ rows }, { rows: [cnt] }] = await Promise.all([
-    pool.query(
-      `SELECT ic.code, ic.created_by, ic.created_by_label, ic.created_at, ic.expires_at,
-              ic.use_count, ic.used_by, ic.used_at, ic.voided_at,
-              ic.invited_role_slug, ir.label AS invited_role_label,
-              COALESCE(cr.level, ${INF_LEVEL}) AS creator_level,
-              u.username AS used_username, u.display_name AS used_display_name
-         ${joins}
-         LEFT JOIN org_roles ir ON ir.slug = ic.invited_role_slug
-         LEFT JOIN identities u ON u.sub = ic.used_by
-        WHERE ${scopeWhere}
-        ORDER BY (ic.used_by IS NOT NULL OR ic.voided_at IS NOT NULL) ASC, ic.created_at DESC
-        LIMIT ${limit} OFFSET ${offset}`,
-      [a.level],
-    ),
-    pool.query(`SELECT count(*)::int AS n ${joins} WHERE ${scopeWhere}`, [a.level]),
-  ]);
-  const canVoidOthers = a.granted.has('org.invites.void');
-  res.json({
-    total: cnt.n,
-    invites: rows.map((r) => ({
-      code: r.code,
-      created_by_label: r.created_by_label,
-      created_at: r.created_at,
-      expires_at: r.expires_at,
-      use_count: r.use_count,
-      invited_role: r.invited_role_slug ? { slug: r.invited_role_slug, label: r.invited_role_label } : null,
-      used: r.used_by != null,
-      used_at: r.used_at,
-      used_by: r.used_by,
-      used_username: r.used_username ?? null,
-      used_display_name: r.used_display_name ?? null,
-      voided: r.voided_at != null,
-      // Own un-consumed codes are ALWAYS voidable (user rule — no permission
-      // needed); others' need org.invites.void + creator strictly below.
-      can_void: r.used_by == null && r.voided_at == null &&
-        (r.created_by === a.sub || (canVoidOthers && Number(r.creator_level) > a.level)),
-    })),
-  });
-});
-
-// POST /account/org/invites {validity_hours?, role_slug} — the invited role is
-// STRICTLY below the creator's own level, so the lowest role can't invite at
-// all even when granted the permission (user rule).
-orgRouter.post('/account/org/invites', scoped, requirePerm('org.invites.create'), requireFreshStepup, async (req: AuthedRequest, res) => {
-  const a = await actorCtx(req);
-  const body = (req.body ?? {}) as { validity_hours?: unknown; role_slug?: unknown };
-  const hours = body.validity_hours === undefined ? 72 : Number(body.validity_hours);
-  if (!Number.isInteger(hours) || hours < 1 || hours > 8760) {
-    return res.status(422).json({ errors: { validity_hours: '1 to 8760 hours' } });
+// Invitation reads and writes retain the existing org proof/conditional sudo gates.
+// Role authority is locked before invitation rows, shared with registration.
+async function invitationOperation(req: AuthedRequest, res: Response,
+  work: (db: pg.PoolClient) => Promise<unknown>, status = 200): Promise<void> {
+  try {
+    const result = await withRoleTransaction(async db => {
+      await assertOrgRoleProof(db, req);
+      await invalidateIneligibleInvitations(db);
+      const value = await work(db);
+      await assertOrgRoleProof(db, req);
+      return value;
+    });
+    res.status(status).json(result);
+  } catch (error) {
+    if (error instanceof InvitationError) { res.status(error.status).json(error.body); return; }
+    if (error instanceof RoleAccessError) { res.status(error.status).json(error.body); return; }
+    console.warn('invitation_operation_unavailable');
+    res.status(503).json({ error: 'invitation_unavailable' });
   }
-  const slug = qstr(body.role_slug);
-  const { rows: [role] } = await pool.query<{ slug: string; label: string; level: number }>(
-    'SELECT slug, label, level FROM org_roles WHERE slug = $1', [slug],
-  );
-  if (!role || !(role.level > a.level)) {
-    return res.status(422).json({ errors: { role_slug: 'Pick a role below your own' } });
-  }
-
-  let code = '';
-  for (let i = 0; i < 5; i++) {
-    code = generateInviteCode();
-    try {
-      // clear_at = expiry + 24h: an expired unused code stays visible for a
-      // day before the sweeper removes it; consumption NULLs it (permanent).
-      const { rows: [row] } = await pool.query(
-        `INSERT INTO invitation_codes (code, created_by, created_by_label, invited_role_slug, expires_at, clear_at)
-         VALUES ($1, $2, $3, $4, now() + make_interval(hours => $5),
-                 now() + make_interval(hours => $5) + interval '24 hours')
-         RETURNING expires_at`,
-        [code, a.sub, a.label, role.slug, hours],
-      );
-      audit({
-        actorSub: a.sub, actorLabel: a.label, action: 'invite.create',
-        detail: { code, role: role.slug, hours },
-      });
-      return res.status(201).json({ code, expires_at: row.expires_at, invited_role: { slug: role.slug, label: role.label } });
-    } catch (e) {
-      if ((e as { code?: string }).code !== '23505') throw e; // collision -> retry
+}
+orgRouter.get('/account/org/invites', scoped, requirePerm('org.invites.view'), requireFreshStepup,
+  (req: AuthedRequest,res) => invitationOperation(req,res,db => listInvitations(db,req.auth!.sub,req.query)));
+orgRouter.get('/account/org/invites/:id', scoped, requirePerm('org.invites.view'), requireFreshStepup,
+  (req: AuthedRequest,res) => invitationOperation(req,res,async db => ({ invitation: serializeInvitation(await readInvitation(db,req.auth!.sub,qstr(req.params.id))) })));
+orgRouter.post('/account/org/invites', scoped, requirePerm('org.invites.create'), requireFreshStepup,
+  (req: AuthedRequest,res) => invitationOperation(req,res,async db => {
+    const result=await createInvitation(db,req.auth!.sub,req.body);
+    if (!result.replayed && result.invitation.delivery==='email') {
+      await queueInvitationMail(db,{id:result.invitation.id,code:result.invitation.code,
+        bound_email:result.invitation.bound_email!,expires_at:result.invitation.expires_at},
+        {actorSub:req.auth!.sub,requestId:req.body.request_id});
     }
-  }
-  res.status(500).json({ error: 'code_generation_failed' });
-});
-
-// DELETE /account/org/invites/:code — void. Own un-consumed code: always
-// allowed (the sole invites exemption). Others': org.invites.void + creator
-// strictly below. Consumed codes are immutable records -> 409.
-orgRouter.delete('/account/org/invites/:code', scoped, requireFreshStepup, async (req: AuthedRequest, res) => {
-  const a = await actorCtx(req);
-  const code = qstr(req.params.code).toUpperCase();
-  if (!CODE_RE.test(code)) return res.status(404).json({ error: 'not_found' });
-  const { rows: [row] } = await pool.query(
-    `SELECT ic.code, ic.created_by, ic.used_by, ic.voided_at, ic.pending_email,
-            COALESCE(cr.level, ${INF_LEVEL}) AS creator_level
-       FROM invitation_codes ic
-       LEFT JOIN identities ci ON ci.sub = ic.created_by AND ci.deleted_at IS NULL
-       LEFT JOIN user_org_roles cur ON cur.user_sub = ci.sub
-       LEFT JOIN org_roles cr ON cr.slug = cur.org_role_slug
-      WHERE ic.code = $1`,
-    [code],
-  );
-  if (!row) return res.status(404).json({ error: 'not_found' });
-  if (row.used_by != null) return res.status(409).json({ error: 'already_used' });
-  if (row.voided_at != null) return res.status(409).json({ error: 'already_voided' });
-  const own = row.created_by === a.sub;
-  if (!own) {
-    if (!a.granted.has('org.invites.void')) return permissionDenied(res, 'org.invites.void');
-    if (!(Number(row.creator_level) > a.level)) {
-      return res.status(403).json({ error: 'creator_not_below' });
+    const latest=(await lockInvitation(db,result.invitation.id))!;
+    return {invitation:serializeInvitation({...latest,can_revoke:result.invitation.can_revoke,can_resend:result.invitation.can_resend})};
+  },201));
+orgRouter.post('/account/org/invites/:id/resend', scoped, requirePerm('org.invites.create'), requireFreshStepup,
+  (req: AuthedRequest,res) => invitationOperation(req,res,async db => {
+    const result=await requestInvitationResend(db,req.auth!.sub,qstr(req.params.id),req.body?.request_id);
+    if (!result.replayed) {
+      await queueInvitationMail(db,{id:result.invitation.id,code:result.invitation.code,
+      bound_email:result.invitation.bound_email!,expires_at:result.invitation.expires_at},
+      {actorSub:req.auth!.sub,requestId:req.body.request_id,requireQueued:true});
     }
-  }
-  // Mark + keep for 24h (clear_at), kill the in-flight link; sweeper deletes.
-  await voidInvite(code, row.pending_email);
-  audit({ actorSub: a.sub, actorLabel: a.label, action: 'invite.void', detail: { code, own } });
-  res.status(204).end();
-});
+    const latest=(await lockInvitation(db,result.invitation.id))!;
+    return {invitation:serializeInvitation({...latest,can_revoke:result.invitation.can_revoke,can_resend:result.invitation.can_resend})};
+  }));
+orgRouter.post('/account/org/invites/:id/revoke', scoped, requireFreshStepup,
+  (req: AuthedRequest,res) => invitationOperation(req,res,async db => ({invitation:serializeInvitation(
+    (await revokeInvitation(db,req.auth!.sub,qstr(req.params.id),req.body?.request_id)).invitation)})));
+// Older callers can address a code, but mutations now carry a durable request UUID.
+orgRouter.delete('/account/org/invites/:id', scoped, requireFreshStepup,
+  (req: AuthedRequest,res) => invitationOperation(req,res,async db => ({invitation:serializeInvitation(
+    (await revokeInvitation(db,req.auth!.sub,qstr(req.params.id),req.body?.request_id)).invitation)})));

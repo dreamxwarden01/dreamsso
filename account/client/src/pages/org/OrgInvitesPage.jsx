@@ -1,304 +1,112 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext.jsx';
-import { orgApi } from '../../api.js';
-import Icon from '../../components/Icon.jsx';
-import Modal from '../../components/Modal.jsx';
-import { Ph } from '../../components/Skeleton.jsx';
-import Pager from '../../components/Pager.jsx';
 import { toast } from '../../components/Toast.jsx';
-import { fmtAgo } from '../../format.js';
-import { useFitRows } from './OrgUsersPage.jsx';
+import InvitationIcon from './invitations/InvitationIcon.jsx';
+import { InvitationPager, InvitationPicker, InvitationTimeProvider, useInvitationTime } from './invitations/InvitationControls.jsx';
+import InvitationRow from './invitations/InvitationRow.jsx';
+import { CreateInvitationDialog, RevokeInvitationDialog } from './invitations/InvitationDialogs.jsx';
+import { createInvitation, resendInvitation, revokeInvitation } from './invitations/invitationApi.js';
+import { authInterruption, cohortKey, invitationError } from './invitations/invitationModel.js';
+import { mutationRequest, settleOperation } from './invitations/invitationOperations.js';
+import { useInvitationList } from './invitations/useInvitationList.js';
+import { readInvitationDraft } from './invitations/invitationDraft.js';
+import './invitations/Invitations.css';
 
-// Invitation codes: live codes + consumed records in one paginated list
-// (page size fits the viewport, same hook as Users). Status states are
-// distinct: Active / Used (permanent record) / Voided (kept 24h) / Expired
-// (kept 24h past expiry). Create picks the invited org role (strictly below
-// the creator) + validity; the result modal centers the code and offers the
-// prefilled /register/start link. Own un-consumed codes are always voidable.
-const fmtWhen = (iso) =>
-  new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
-const VALIDITY = [
-  { hours: 24, label: '24 hours' },
-  { hours: 72, label: '3 days' },
-  { hours: 168, label: '7 days' },
-  { hours: 720, label: '30 days' },
-];
-
-function PlaceholderRows({ cardRef, count }) {
-  return (
-    <div className="card" ref={cardRef}>
-      {Array.from({ length: count }).map((_, i) => (
-        <div className="row" key={i}>
-          <p className="row-title mono" style={{ margin: 0, minWidth: 150 }}><Ph w={120} /></p>
-          <p className="k" style={{ margin: 0, fontSize: 12, flex: 1 }}><Ph w={190 + ((i * 31) % 60)} /></p>
-          <span className="skeleton" style={{ width: 56, height: 20, borderRadius: 99 }} />
-        </div>
-      ))}
-    </div>
-  );
+const SORTS = [{ value: 'created_at:desc', label: 'Created: newest first' }, { value: 'created_at:asc', label: 'Created: oldest first' }, { value: 'code:asc', label: 'Code: A–Z' }, { value: 'code:desc', label: 'Code: Z–A' }];
+const SIZES = [10, 25, 100].map((n) => ({ value: String(n), label: n + ' per page' }));
+function PlaceholderRows() {
+  return <>{Array.from({ length: 10 }, (_, i) => <div className="iv-loading-placeholder" key={i} aria-hidden="true"><div className="iv-row-title-placeholder"/><div className="iv-row-meta-placeholder"/></div>)}</>;
 }
-
-// Pane skeleton (also used by the org gate): static chrome for real, fitted rows shimmer.
 export function InvitesSkeleton() {
-  const { can } = useAuth();
-  const { cardRef, pageSize } = useFitRows();
-  return (
-    <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h1 style={{ flex: 1 }}>Invitations</h1>
-        {can('org.invites.create') && (
-          <button className="btn btn-primary"><Icon name="plus" size={15} /> Create code</button>
-        )}
-      </div>
-      <p className="sub">Invitation codes for new accounts — consumed codes stay on record.</p>
-      <PlaceholderRows cardRef={cardRef} count={pageSize} />
-    </>
-  );
+  return <section className="iv-ui iv-page" aria-busy="true"><div className="iv-headrow"><div><h1>Invitations</h1><p className="sub">Each invitation creates exactly one new account.</p></div></div><div className="iv-inv-card"><PlaceholderRows/></div></section>;
 }
-
 export default function OrgInvitesPage() {
-  const { can } = useAuth();
-  // `data` is sticky across page flips (pager stays; skeleton count matches).
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(1); // 1-based
-  const [err, setErr] = useState(null);
-  const [creating, setCreating] = useState(false);
-  const [created, setCreated] = useState(null); // { code, expires_at, invited_role }
-  const [voiding, setVoiding] = useState(null); // code pending confirm
-  const [busy, setBusy] = useState(false);
-  const { cardRef, pageSize, measured } = useFitRows();
-
-  const load = useCallback((pg, size) => {
-    setLoading(true);
-    orgApi('GET', `/invites?limit=${size}&offset=${(pg - 1) * size}`)
-      .then((d) => { setData(d); setErr(null); setLoading(false); })
-      .catch((e) => { if (e.message !== 'unauthenticated') { setErr(e.code || 'error'); setLoading(false); } });
-  }, []);
-  useEffect(() => {
-    if (measured) load(page, pageSize);
-  }, [page, pageSize, measured, load]);
-
-  // A resize that changes the fit re-pages so the first visible row stays put.
-  const prevSize = useRef(null);
-  useEffect(() => {
-    const prev = prevSize.current;
-    prevSize.current = pageSize;
-    if (prev && prev !== pageSize) setPage((cur) => Math.floor(((cur - 1) * prev) / pageSize) + 1);
-  }, [pageSize]);
-
-  const reload = () => load(page, pageSize);
-
-  const doVoid = async () => {
-    setBusy(true);
-    try {
-      await orgApi('DELETE', '/invites/' + voiding);
-      toast.success('Invitation code voided.');
-      setVoiding(null);
-      reload();
-    } catch (e) {
-      if (e.message !== 'unauthenticated') {
-        toast.error(e.code === 'already_used'
-          ? "Can't void — this code was already used."
-          : e.code === 'already_voided'
-            ? 'This code was already voided.'
-            : `Couldn't void the code. [${e.code || 'error'}]`);
-        reload();
-      }
-      setVoiding(null);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const total = data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / pageSize));
-
-  const now = Date.now();
-  const statusOf = (v) => (v.used ? 'used' : v.voided ? 'voided' : Date.parse(v.expires_at) < now ? 'expired' : 'active');
-
-  if (err && !data) return (<><h1>Invitations</h1><p className="err">Couldn't load. [{err}]</p></>);
-
-  return (
-    <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h1 style={{ flex: 1 }}>Invitations</h1>
-        {can('org.invites.create') && (
-          <button className="btn btn-primary" onClick={() => setCreating(true)}>
-            <Icon name="plus" size={15} /> Create code
-          </button>
-        )}
-      </div>
-      <p className="sub">Invitation codes for new accounts — consumed codes stay on record.</p>
-
-      {loading && (
-        <PlaceholderRows
-          cardRef={cardRef}
-          count={data ? Math.min(pageSize, Math.max(1, (data.total ?? pageSize) - (page - 1) * pageSize)) : pageSize}
-        />
-      )}
-
-      {!loading && data && (
-        <div className="card" ref={cardRef}>
-          {data.invites.length === 0 && (
-            <div style={{ padding: '42px 0', textAlign: 'center' }}>
-              <p className="k" style={{ margin: 0 }}>No invitation codes yet.</p>
-            </div>
-          )}
-          {data.invites.map((v) => {
-            const st = statusOf(v);
-            return (
-              <div className="row" key={v.code} style={st !== 'active' ? { opacity: st === 'used' ? 0.75 : 0.55 } : undefined}>
-                <p className="row-title mono" style={{ margin: 0, minWidth: 150 }}>{v.code}</p>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <p className="k" style={{ margin: 0, fontSize: 12, overflowWrap: 'anywhere' }}>
-                    {v.invited_role ? v.invited_role.label : 'default role'} · by {v.created_by_label} · {fmtAgo(v.created_at)}
-                    {st === 'active' && <> · expires {fmtWhen(v.expires_at)}</>}
-                    {v.use_count > 1 && st === 'active' && <> · {v.use_count}/3 uses</>}
-                  </p>
-                  {v.used && (
-                    <p className="k" style={{ margin: 0, fontSize: 12 }}>
-                      used by <strong>{v.used_username ?? v.used_by}</strong>
-                      {v.used_display_name ? ` (${v.used_display_name})` : ''} · {fmtWhen(v.used_at)}
-                    </p>
-                  )}
-                </div>
-                {st === 'used' && <span className="pill">Used</span>}
-                {st === 'voided' && <span className="pill pill-bad">Voided</span>}
-                {st === 'expired' && <span className="pill pill-warn">Expired</span>}
-                {st === 'active' && <span className="pill pill-ok">Active</span>}
-                {v.can_void && st === 'active' && (
-                  <button className="btn btn-danger" onClick={() => setVoiding(v.code)}>Void</button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {data && total > 0 && (
-        <Pager
-          page={page} pages={pages} total={total}
-          from={(page - 1) * pageSize + 1} to={Math.min(page * pageSize, total)}
-          onPage={setPage}
-        />
-      )}
-
-      {creating && (
-        <CreateInviteModal
-          onClose={() => setCreating(false)}
-          onCreated={(d) => { setCreating(false); setCreated(d); reload(); }}
-        />
-      )}
-      {created && <InviteResultModal invite={created} onClose={() => setCreated(null)} />}
-      {voiding && (
-        <Modal title="Void this code?" onClose={() => setVoiding(null)}>
-          <p className="modal-msg">
-            <span className="mono">{voiding}</span> stops working immediately — any half-finished
-            registration using it dies with it. The voided code stays listed for 24 hours.
-          </p>
-          <div className="modal-actions">
-            <button className="btn btn-danger" onClick={doVoid} disabled={busy}>{busy ? 'Voiding…' : 'Void code'}</button>
-            <button className="btn" onClick={() => setVoiding(null)} disabled={busy}>Cancel</button>
-          </div>
-        </Modal>
-      )}
-    </>
-  );
+  const { user, can } = useAuth(), actor = user?.profile?.sub;
+  if (typeof actor !== 'string' || !actor) return <InvitesSkeleton/>;
+  return <InvitationTimeProvider key={actor}><InvitationsWorkspace actor={actor} canCreate={can('org.invites.create')}/></InvitationTimeProvider>;
 }
-
-function CreateInviteModal({ onClose, onCreated }) {
-  const [roles, setRoles] = useState(null);
-  const [roleSlug, setRoleSlug] = useState('');
-  const [validity, setValidity] = useState(72);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    orgApi('GET', '/roles')
-      .then((d) => {
-        // Strictly below the creator — the same assignable set as user-create.
-        const assignable = d.roles.filter((r) => r.editable);
-        setRoles(assignable);
-        setRoleSlug(d.default_role && assignable.some((r) => r.slug === d.default_role)
-          ? d.default_role
-          : (assignable[0]?.slug ?? ''));
-      })
-      .catch(() => setRoles([]));
-  }, []);
-
-  const submit = async () => {
-    if (!roleSlug || busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const d = await orgApi('POST', '/invites', { role_slug: roleSlug, validity_hours: validity });
-      onCreated(d);
-    } catch (e) {
-      if (e.message !== 'unauthenticated') setErr(e.data?.errors ? Object.values(e.data.errors)[0] : e.code || 'error');
-    } finally {
-      setBusy(false);
+function InvitationsWorkspace({ actor, canCreate }) {
+  const { model, engine } = useInvitationList(), time = useInvitationTime();
+  const initialDraft = useRef(undefined);
+  if (initialDraft.current === undefined) { try { initialDraft.current = readInvitationDraft(sessionStorage, actor); } catch { initialDraft.current = null; } }
+  const [creating, setCreating] = useState(() => !!initialDraft.current), [revoking, setRevoking] = useState(null), [widthVersion, setWidthVersion] = useState(0);
+  const list = useRef(null), floor = useRef({ key: '', height: 0, width: 0 }), modalOpen = useRef(false);
+  modalOpen.current = creating || !!revoking;
+  const committed = model.data, cohort = model.committedQuery ? cohortKey(model.committedQuery) : '';
+  useLayoutEffect(() => {
+    const node = list.current; if (!node || !committed) return;
+    const width = Math.round(node.getBoundingClientRect().width), key = cohort + '|' + width;
+    if (floor.current.key !== key) floor.current = { key, height: 0, width };
+    if (committed.items.length === committed.pageSize) {
+      const natural = [...node.children].reduce((n, row) => {
+        const details = row.querySelector('.iv-inv-details'); return n + row.getBoundingClientRect().height - (details?.getBoundingClientRect().height || 0);
+      }, 0);
+      floor.current.height = Math.max(floor.current.height, Math.ceil(natural));
     }
+    node.style.minHeight = floor.current.height && committed.items.length ? floor.current.height + 'px' : '';
+  }, [committed, cohort, widthVersion]);
+  useEffect(() => {
+    const observer = new ResizeObserver(() => { const width = Math.round(list.current?.getBoundingClientRect().width || 0); if (width && floor.current.width !== width) { floor.current.width = width; setWidthVersion((v) => v + 1); } });
+    observer.observe(list.current); return () => observer.disconnect();
+  }, []);
+  useEffect(() => { if (model.overlay) time.close(); }, [model.overlay]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible' || modalOpen.current) return;
+      const current = engine.current?.getState();
+      if (!current || current.pending || !current.data) return;
+      if (current.data.items.some((v) => ['queued', 'sending'].includes(v.mail.state))) engine.current.refresh({ quiet: true });
+    }, 2000);
+    const clock = setInterval(() => {
+      window.dispatchEvent(new Event('invitation-clock'));
+      const current = engine.current?.getState();
+      if (document.visibilityState === 'visible' && !modalOpen.current && !current?.pending
+        && current?.data?.items.some((v) => v.status === 'active' && Date.now() >= v.expiresAt)) engine.current.refresh({ quiet: true });
+    }, 15000);
+    return () => { clearInterval(timer); clearInterval(clock); };
+  }, [engine]);
+  const update = (patch, options) => { time.close(); engine.current?.update(patch, options); };
+  const page = (number) => {
+    const current = engine.current?.getState();
+    if (!current?.data || !Number.isInteger(number) || number < 1 || number > current.data.pages || number === current.query.page) return;
+    update({ page: number });
   };
-
-  return (
-    <Modal title="Create invitation code" onClose={onClose}>
-      <div className="form">
-        <label className="field"><span>Invited role</span>
-          <select className="input fit" value={roleSlug} onChange={(e) => setRoleSlug(e.target.value)}>
-            {(roles ?? []).map((r) => <option key={r.slug} value={r.slug}>{r.label} (level {r.level})</option>)}
-          </select>
-          <span className="fhint">Only roles below your own — the account starts with this role.</span>
-        </label>
-        <label className="field"><span>Valid for</span>
-          <select className="input fit" value={validity} onChange={(e) => setValidity(Number(e.target.value))}>
-            {VALIDITY.map((v) => <option key={v.hours} value={v.hours}>{v.label}</option>)}
-          </select>
-        </label>
-        {roles && roles.length === 0 && (
-          <p className="fhint bad">No role sits below yours — you can&rsquo;t create invitations.</p>
-        )}
-        {err && <p className="err">Couldn&rsquo;t create the code. [{err}]</p>}
-        <div className="modal-actions">
-          <button className="btn btn-primary" onClick={submit} disabled={busy || !roleSlug}>
-            {busy ? 'Creating…' : 'Create code'}
-          </button>
-          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function InviteResultModal({ invite, onClose }) {
-  const [copied, setCopied] = useState(null); // 'code' | 'link'
-  const link = `${window.location.origin}/register/start?code=${invite.code}`;
-  const copy = async (what, text) => {
+  const mutate = useCallback(async (kind, invite, body = {}) => {
+    time.close(); engine.current?.invalidate(); let operation;
     try {
-      await navigator.clipboard.writeText(text);
-      setCopied(what);
-      setTimeout(() => setCopied(null), 1500);
-    } catch { /* clipboard blocked — the code is visible to select manually */ }
-  };
-  return (
-    <Modal title="Invitation code created" onClose={onClose}>
-      <p className="modal-msg">
-        For a <strong>{invite.invited_role?.label ?? 'default role'}</strong> account ·
-        expires {fmtWhen(invite.expires_at)}. Share the link — the code comes prefilled.
-      </p>
-      <div className="keyfield" style={{ marginBottom: 12 }}>
-        <span className="keytext" style={{ letterSpacing: '.14em', textAlign: 'center', fontSize: 17 }}>{invite.code}</span>
+      operation = await mutationRequest(actor, kind, invite?.id, body);
+      const result = kind === 'create' ? await createInvitation({ ...body, request_id: operation.id })
+        : kind === 'resend' ? await resendInvitation(invite.id, operation.id) : await revokeInvitation(invite.id, operation.id);
+      settleOperation(operation); engine.current?.refresh(); return result;
+    } catch (error) {
+      settleOperation(operation, error);
+      if (!authInterruption(error) && ['already_used', 'invitation_used', 'invitation_revoked', 'invitation_expired', 'invitation_gone'].includes(error.code)) engine.current?.refresh({ quiet: true });
+      throw error;
+    }
+  }, [actor, engine, time.close]);
+  const caption = model.query.status === 'current' ? 'Waiting to be used. Email status is shown separately — an invitation stays valid even if a send failed.'
+    : model.query.status === 'history' ? 'Finished invitation records are retained. Nothing can be deleted from this view.' : 'All invitations, including finished records. Email status is separate from invitation status.';
+  return <section className="iv-ui iv-page">
+    <div className="iv-headrow"><div><h1>Invitations</h1><p className="sub">Each invitation creates exactly one new account.</p></div>
+      {canCreate && <button type="button" className="iv-btn iv-btn-primary iv-new-btn" onClick={() => { time.close(); setCreating(true); }}><InvitationIcon name="plus" className="iv-ico-14"/>New invitation</button>}</div>
+    <div className="iv-filterrow"><div className="iv-seg" role="group" aria-label="Show invitations">{['all', 'current', 'history'].map((status) => <button type="button" key={status} aria-pressed={model.query.status === status} onClick={() => update({ status, page: 1 })}>
+      {status[0].toUpperCase() + status.slice(1)}<span className="iv-n">{committed?.counts[status]?.toLocaleString() ?? '—'}</span></button>)}</div></div>
+    <div className="iv-list-toolbar"><label className="iv-search-field"><span className="iv-sr-only">Search invitations</span><input className="iv-input" type="search" autoComplete="off" maxLength={100} placeholder="Search code, email, note or record ID" value={model.query.query}
+      onChange={(e) => update({ query: e.target.value, page: 1 }, { debounce: true })}/></label>
+      <InvitationPicker label="Sort invitations" value={model.query.sort + ':' + model.query.order} options={SORTS} onChange={(value) => { const [sort, order] = value.split(':'); update({ sort, order, page: 1 }); }}/>
+      <InvitationPicker label="Invitations per page" value={String(model.query.pageSize)} options={SIZES} onChange={(value) => update({ pageSize: Number(value), page: 1 })}/>
+    </div>
+    <p className="iv-filter-cap">{caption}</p>
+    <InvitationPager position="top" data={committed} wantedPage={model.query.page} onPage={page}/>
+    <p className={'iv-list-feedback' + (model.error ? ' iv-bad' : '')} role="status" aria-live="polite">{model.error ? <>{invitationError(model.error)}<button type="button" className="iv-btn" onClick={() => engine.current?.refresh()}>Retry</button></> : ''}</p>
+    <div className="iv-inv-card" data-loading={model.overlay} aria-busy={model.pending}>
+      <div ref={list} role="list" aria-label="Invitations" inert={model.overlay || !!model.error}>
+        {!committed ? <PlaceholderRows/> : committed.items.length ? committed.items.map((invite) => <InvitationRow key={invite.id} invite={invite} onResend={(v) => mutate('resend', v)} onRevoke={setRevoking}/>) : <div className="iv-inv-empty">{model.query.query ? 'No invitations match this search.' : 'No invitations in this filter.'}</div>}
       </div>
-      <div className="modal-actions">
-        <button className="btn btn-primary" onClick={() => copy('link', link)}>
-          <Icon name="copy" size={14} /> {copied === 'link' ? 'Copied!' : 'Copy link'}
-        </button>
-        <button className="btn" onClick={() => copy('code', invite.code)}>
-          <Icon name="copy" size={14} /> {copied === 'code' ? 'Copied!' : 'Copy code'}
-        </button>
-        <button className="btn" onClick={onClose}>Done</button>
-      </div>
-    </Modal>
-  );
+      <div className="iv-list-loading-mask" aria-hidden="true"><div className="iv-list-loading-track"><span className="iv-list-loading-runner"/></div></div>
+    </div>
+    <InvitationPager position="bottom" data={committed} wantedPage={model.query.page} onPage={page}/>
+    {creating && <CreateInvitationDialog actor={actor} initialForm={initialDraft.current} onClose={() => { initialDraft.current = null; setCreating(false); }} onCreate={(body) => mutate('create', null, body)}/>}
+    {revoking && <RevokeInvitationDialog invite={revoking} onClose={() => setRevoking(null)} onRevoke={async (invite) => { const result = await mutate('revoke', invite); toast.success('Invitation revoked. Its record is kept.'); return result; }}/>}
+  </section>;
 }

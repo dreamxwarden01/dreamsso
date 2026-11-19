@@ -452,26 +452,103 @@ CREATE TABLE audit_log (                          -- append-only
 );
 CREATE INDEX idx_audit_subject ON audit_log (subject_sub, occurred_at DESC);
 CREATE INDEX idx_audit_type    ON audit_log (event_type, occurred_at DESC);
--- Registration: invitation codes (user design, 2026-07-08)
--- Lifecycle: live -> CONSUMED (row kept forever: used_by uuid, username via
--- join at read) | VOIDED (row deleted) | EXPIRED-unused (deleted by sweeper).
--- use_count counts EMAIL SWITCHES at /register/start (first use included;
--- same-email resends are free) — a 4th switch voids the code.
--- invited_role_slug: org role picked at creation (strictly below creator);
--- NULL (or role deleted -> FK sets NULL) falls back to default_org_role.
+-- Registration invitations retain all terminal records permanently. A displayed
+-- code identifies eligibility; mailbox ownership proofs live in separate storage.
 CREATE TABLE IF NOT EXISTS invitation_codes (
-    code             text PRIMARY KEY CHECK (code ~ '^[A-Z0-9]{12}$'),
-    created_by       uuid REFERENCES identities(sub) ON DELETE SET NULL,
-    created_by_label text NOT NULL,          -- snapshot, survives creator deletion
+    code text PRIMARY KEY CHECK(code ~ '^[A-Z0-9]{12}$'),
+    created_by uuid REFERENCES identities(sub) ON DELETE SET NULL,
+    created_by_label text NOT NULL,
     invited_role_slug text REFERENCES org_roles(slug) ON DELETE SET NULL,
-    created_at       timestamptz NOT NULL DEFAULT now(),
-    expires_at       timestamptz NOT NULL,
-    use_count        integer NOT NULL DEFAULT 0,
-    pending_email    citext,                 -- the one in-flight registration
-    pending_at       timestamptz,            -- stamp for the stale-pending sweep
-    used_by          uuid REFERENCES identities(sub) ON DELETE SET NULL,
-    used_at          timestamptz,
-    voided_at        timestamptz,            -- distinguishes Voided from Expired
-    clear_at         timestamptz             -- deletion due; NULL = consumed, keep forever
+    created_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    use_count integer NOT NULL DEFAULT 0,
+    pending_email citext,
+    pending_at timestamptz,
+    used_by uuid REFERENCES identities(sub) ON DELETE SET NULL,
+    used_at timestamptz,
+    voided_at timestamptz,
+    clear_at timestamptz
 );
-CREATE INDEX IF NOT EXISTS idx_invitation_codes_expiry ON invitation_codes (expires_at) WHERE used_by IS NULL;
+CREATE INDEX IF NOT EXISTS idx_invitation_codes_expiry ON invitation_codes(expires_at) WHERE used_by IS NULL;
+-- Single-use invitations: permanent history and actor-bound management receipts.
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS id uuid NOT NULL DEFAULT gen_random_uuid();
+CREATE UNIQUE INDEX IF NOT EXISTS invitation_codes_id ON invitation_codes(id);
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS bound_email citext;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS bound_at timestamptz;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS binding_source text CHECK(binding_source IN ('creation','first_request'));
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'link' CHECK(delivery IN ('link','email'));
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '' CHECK(char_length(note)<=60);
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS invited_role_slug_snapshot text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS invited_role_label text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS invalid_reason text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS revoked_by uuid;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS revoked_by_label text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS used_username_snapshot text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS used_display_name_snapshot text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS mail_state text NOT NULL DEFAULT 'none' CHECK(mail_state IN ('none','queued','sending','sent','failed','unknown'));
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS mail_attempts integer NOT NULL DEFAULT 0 CHECK(mail_attempts>=0);
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS mail_last_at timestamptz;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS mail_error_code text;
+ALTER TABLE invitation_codes ADD COLUMN IF NOT EXISTS mail_next_retry_at timestamptz;
+-- Preserve an already-selected legacy mailbox, never reopen it to a new holder.
+UPDATE invitation_codes SET bound_email=pending_email,bound_at=COALESCE(pending_at,created_at),binding_source='first_request'
+ WHERE bound_email IS NULL AND pending_email IS NOT NULL;
+UPDATE invitation_codes ic SET invited_role_slug_snapshot=COALESCE(ic.invited_role_slug,'deleted'),
+ invited_role_label=COALESCE((SELECT r.label FROM org_roles r WHERE r.slug=ic.invited_role_slug),'Deleted role')
+ WHERE invited_role_slug_snapshot IS NULL;
+UPDATE invitation_codes ic SET used_username_snapshot=u.username,used_display_name_snapshot=u.display_name
+ FROM identities u WHERE ic.used_by=u.sub AND ic.used_at IS NOT NULL AND ic.used_username_snapshot IS NULL;
+UPDATE invitation_codes SET invalidated_at=clock_timestamp(),invalid_reason='role_deleted'
+ WHERE used_at IS NULL AND invited_role_slug IS NULL AND invalidated_at IS NULL;
+UPDATE invitation_codes SET clear_at=NULL WHERE clear_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS invitation_codes_page ON invitation_codes(created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS invitation_codes_active ON invitation_codes(created_by,expires_at)
+ WHERE used_at IS NULL AND voided_at IS NULL AND invalidated_at IS NULL;
+CREATE TABLE IF NOT EXISTS invitation_requests (
+ actor_sub uuid NOT NULL,
+ request_id uuid NOT NULL,
+ operation text NOT NULL CHECK(operation IN ('create','resend','revoke')),
+ invitation_id uuid NOT NULL REFERENCES invitation_codes(id) ON DELETE RESTRICT,
+ input jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(actor_sub,request_id)
+);
+-- Invitation email proofs are private; invitation codes remain ordinary audit identifiers.
+CREATE TABLE IF NOT EXISTS invitation_mail_jobs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    invitation_id uuid NOT NULL REFERENCES invitation_codes(id),
+    request_id uuid NOT NULL,
+    actor_key text NOT NULL,
+    email citext NOT NULL,
+    proof_hash bytea NOT NULL UNIQUE,
+    payload_enc bytea,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    state text NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','sending','sent','failed','unknown')),
+    lease_id uuid,
+    lease_until timestamptz,
+    finished_at timestamptz,
+    error_code text,
+    UNIQUE (actor_key,request_id)
+);
+CREATE INDEX IF NOT EXISTS invitation_mail_queue ON invitation_mail_jobs(created_at,id) WHERE state='queued';
+CREATE INDEX IF NOT EXISTS invitation_mail_by_invite ON invitation_mail_jobs(invitation_id,created_at DESC);
+-- A committed account can be recovered after a lost HTTP response, without creating another account.
+CREATE TABLE IF NOT EXISTS registration_completions (
+    proof_hash bytea PRIMARY KEY,
+    user_sub uuid NOT NULL REFERENCES identities(sub),
+    request_hash bytea NOT NULL,
+    completed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    retry_until timestamptz NOT NULL
+);
+
+-- Public retries can coalesce onto an existing queued job without losing their idempotency receipt.
+CREATE TABLE IF NOT EXISTS invitation_mail_requests (
+    actor_key text NOT NULL,
+    request_id uuid NOT NULL,
+    invitation_id uuid NOT NULL REFERENCES invitation_codes(id),
+    email citext NOT NULL,
+    job_id uuid NOT NULL REFERENCES invitation_mail_jobs(id),
+    PRIMARY KEY(actor_key,request_id)
+);

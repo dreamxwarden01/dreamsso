@@ -33,6 +33,8 @@ import { resolveSetupState, isSetupComplete } from './setup/state.js';
 import { ensureSetupToken, SETUP_TOKEN_FILE } from './setup/token.js';
 import { startEventPump,stopEventPump,settleEventPump } from './events.js';
 import { sweepInvitations } from './registration.js';
+import { drainInvitationMail } from './invitationMail.js';
+import { withRoleTransaction } from './rbac/roleChanges.js';
 import { pool } from './db.js';
 import { redis } from './redis.js';
 import { getSigningKey,getJwks } from './keys.js';
@@ -182,13 +184,18 @@ async function main() {
   // The unconfigured installer branch above still starts without a database.
   await runMigrations({ strict: true });
   if(lifecycle.stopping)return;
+  // Apply current creator/role eligibility to legacy invitations before serving requests.
+  await withRoleTransaction(async()=>{});
+  if(lifecycle.stopping)return;
 
   const { kid } = await getSigningKey();
   if(lifecycle.stopping)return;
   // DB backstop: prune sessions past the idle/absolute windows (hourly + at boot).
   lifecycle.every(cleanExpiredSessions, 60 * 60 * 1000);
-  // Expired unused invitation codes die by the hour; consumed rows are forever.
+  // Retain invitation history; prune only expired private registration material.
   lifecycle.every(sweepInvitations, 60 * 60 * 1000);
+  let mailRunning=false;
+  lifecycle.every(async()=>{if(mailRunning)return;mailRunning=true;try{await drainInvitationMail();}finally{mailRunning=false;}}, 2000);
   startEventPump(); // boot drain + 60s retry sweep + archive pruning
   lifecycle.listen(()=>app.listen(config.port, () => {
     console.log(`DreamSSO listening on :${config.port} — issuer ${config.issuer} — signing kid ${kid}`);

@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { pool } from '../db.js';
 import { insertEvents } from '../events/outboxStore.js';
+import { invalidateIneligibleInvitations } from '../invitations.js';
 
 const ROLE_WRITE_LOCK = 1_145_624_915;
 export interface RoleSyncState {
@@ -28,6 +29,7 @@ export async function withRoleTransaction<T>(work: (db: pg.PoolClient) => Promis
     await db.query('BEGIN');
     await lockRoleWrites(db);
     const result = await work(db);
+    await invalidateIneligibleInvitations(db);
     await db.query('COMMIT');
     return result;
   } catch (error) {

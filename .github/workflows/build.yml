@@ -1,8 +1,8 @@
 name: build images
 
 # Build the SSO and account-portal (BFF) images and push them to GHCR on every push
-# to main. amd64 only (prod is x86 — the ubuntu runner builds it natively). There is
-# NO auto-deploy wired to this repo; the server pulls these images deliberately.
+# to main. amd64 only (prod is x86 — the ubuntu runner builds it natively).
+# CI publishes images; the deployment updater runs separately from this workflow.
 on:
   push:
     branches: [main]
@@ -35,8 +35,10 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts
+      - run: npm ci --prefix account/client --ignore-scripts
       - run: npm run typecheck
       - run: npm run test:events
+      - run: npm run test:invitations
       - run: npm run test:auth-security
       - run: npm run test:admin
       - run: npm run test:shutdown

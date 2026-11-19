@@ -5,7 +5,7 @@
 openapi: 3.1.0
 info:
   title: DreamSSO service-to-service API (mTLS / API Shield)
-  version: "2026-10-14"
+  version: "2026-11-18"
   description: >
     Server-to-server endpoints on sso.dreamxwarden.ca that sit behind the CF
     mTLS require-cert set: OIDC token/userinfo, the RP event channel, and the
@@ -71,6 +71,40 @@ components:
           enum: ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"]
         client_assertion: { type: string, description: Signed JWT }
       required: [client_assertion_type, client_assertion]
+    RegistrationInvitation:
+      type: object
+      description: >
+        Code-keyed registration preview. The code identifies an invitation;
+        this response contains no mailbox-ownership proof. Reading it does not
+        bind an email, send mail or consume the invitation. An unused invitation
+        becomes unavailable if its offered role is deleted or its creator loses
+        invitation authority. Completed accounts are unaffected.
+      properties:
+        code: { type: string, pattern: "^[A-Z0-9]{12}$" }
+        label: { type: string }
+        status: { type: string, enum: [unused, used, expired, revoked, unavailable] }
+        role:
+          type: object
+          properties:
+            id: { type: [string, "null"] }
+            name: { type: [string, "null"] }
+          required: [id, name]
+        created_at: { type: string, format: date-time }
+        expires_at:
+          type: string
+          format: date-time
+          description: Strict, immutable deadline shared by the invitation and its emailed proof.
+        bound_email: { type: [string, "null"], format: email }
+        bound_at: { type: [string, "null"], format: date-time }
+        mail:
+          type: object
+          properties:
+            state: { type: string, enum: [none, queued, sending, sent, failed, unknown] }
+            at: { type: [string, "null"], format: date-time }
+            error_code: { type: [string, "null"] }
+          required: [state, at, error_code]
+          description: Independent send status. Sent means provider accepted, not delivered or read.
+      required: [code, label, status, role, created_at, expires_at, bound_email, bound_at, mail]
     Challenge:
       type: object
       nullable: true
@@ -433,11 +467,15 @@ paths:
                 required: [error]
         "403": { description: too_many_attempts, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { description: invalid_token / weak_password, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-  /internal/register/start:
+  /internal/register/invitation:
     post:
-      operationId: internalRegisterStart
+      operationId: internalRegisterInvitation
       tags: [internal]
-      summary: Begin registration (invite code + email), send link
+      summary: Preview an invitation without sending mail or consuming it
+      description: >
+        Account BFF client authentication is required. Returns current invitation
+        metadata, including terminal states and a bound address when present.
+        Mailbox verification tokens are never returned by this endpoint.
       security: [ { edgeMutualTLS: [] } ]
       requestBody:
         required: true
@@ -448,32 +486,82 @@ paths:
                 - $ref: "#/components/schemas/ClientAssertion"
                 - type: object
                   properties:
-                    email: { type: string, format: email }
-                    code: { type: string }
+                    code: { type: string, pattern: "^[A-Z0-9]{12}$" }
+                  required: [code]
+      responses:
+        "200":
+          description: Invitation preview, including used or unavailable states
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invitation: { $ref: "#/components/schemas/RegistrationInvitation" }
+                required: [invitation]
+        "401": { description: invalid_client }
+        "403": { description: registration_closed }
+        "404": { description: invalid_invitation }
+        "503": { description: registration_unavailable }
+  /internal/register/start:
+    post:
+      operationId: internalRegisterStart
+      tags: [internal]
+      summary: Request a registration email
+      description: >
+        Invitation registration queues mail asynchronously. The first accepted
+        email request irrevocably binds an unbound invitation; a bound address
+        must match. Reuse request_id when retrying the same request. A new resend
+        keeps the original invitation/proof deadline and is subject to address
+        and invitation cooldowns. Queue acceptance is not delivery confirmation;
+        poll the invitation preview for mail state. Open registration without
+        an invitation retains its short, synchronous email-verification flow.
+      security: [ { edgeMutualTLS: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ClientAssertion"
+                - type: object
+                  properties:
+                    email: { type: string, format: email, maxLength: 254 }
+                    code: { type: string, pattern: "^[A-Z0-9]{12}$" }
+                    request_id:
+                      type: string
+                      format: uuid
+                      description: Stable request ID for invitation-email retries; use a new ID for an explicit resend.
                   required: [email]
       responses:
         "200":
-          description: Link sent
+          description: Current send state; queued does not mean sent
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  sent: { type: boolean, enum: [true] }
+                  queued: { type: boolean }
+                  sent: { type: boolean, description: True only when provider acceptance is known. }
+                  email: { type: string, format: email }
+                  bound_email: { type: string, format: email }
+                  expires_at: { type: string, format: date-time }
+                  invitation: { $ref: "#/components/schemas/RegistrationInvitation" }
                   resend_backoff: { type: integer }
-                required: [sent]
+                required: [sent, resend_backoff]
         "401": { description: invalid_client }
-        "403": { description: registration_closed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: registration_closed / email_mismatch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: invitation_used / invitation_expired / invitation_revoked / invitation_unavailable / request_conflict }
         "422":
-          description: field errors
+          description: Invalid invitation, email, request ID or field errors
           content:
             application/json:
               schema:
                 type: object
                 properties:
+                  error: { type: string }
                   errors: { type: object, additionalProperties: { type: string } }
         "429":
-          description: rate_limited
+          description: rate_limited; no new mail request was accepted
           content:
             application/json:
               schema:
@@ -482,12 +570,16 @@ paths:
                   error: { type: string }
                   retry_after: { type: integer }
                   can_retry: { type: boolean }
-        "503": { description: email_not_configured / send_failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+                  bound_email: { type: string, format: email }
+                  expires_at: { type: string, format: date-time }
+                  invitation: { $ref: "#/components/schemas/RegistrationInvitation" }
+        "503": { description: registration_unavailable; open registration may return email_not_configured / send_failed }
   /internal/register/validate:
     post:
       operationId: internalRegisterValidate
       tags: [internal]
-      summary: Is the registration link usable?
+      summary: Validate the mailbox-verification link
+      description: Emailed proofs must match the bound address and an unused, eligible invitation before its strict deadline.
       security: [ { edgeMutualTLS: [] } ]
       requestBody:
         required: true
@@ -508,10 +600,20 @@ paths:
             application/json:
               schema:
                 type: object
-                properties: { valid: { type: boolean, enum: [true] } }
+                properties:
+                  valid: { type: boolean, enum: [true] }
+                  email: { type: string, format: email }
+                  bound_email: { type: string, format: email }
+                  expires_at: { type: string, format: date-time }
+                  invitation:
+                    oneOf:
+                      - $ref: "#/components/schemas/RegistrationInvitation"
+                      - type: "null"
                 required: [valid]
         "401": { description: invalid_client }
-        "403": { description: registration_closed }
+        "403": { description: registration_closed / email_mismatch }
+        "409": { description: invitation_used / invitation_expired / invitation_revoked / invitation_unavailable }
+        "503": { description: registration_unavailable }
         "422": { description: invalid_token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /internal/register/check-username:
     post:
@@ -542,12 +644,23 @@ paths:
                 properties: { available: { type: boolean } }
                 required: [available]
         "401": { description: invalid_client }
+        "403": { description: registration_closed / email_mismatch }
+        "409": { description: invitation_used / invitation_expired / invitation_revoked / invitation_unavailable }
+        "503": { description: registration_unavailable }
         "422": { description: invalid_token / invalid_username }
   /internal/register/complete:
     post:
       operationId: internalRegisterComplete
       tags: [internal]
-      summary: Create the identity, consume invite, mint welcome ticket
+      summary: Create the account and atomically consume its invitation
+      description: >
+        Identity creation, initial role, invitation consumption and a completion
+        receipt commit together. The invitation and proof must still be valid
+        after any lock wait; an invitation can create only one account. A recent
+        identical retry returns a normal sign-in URL with already_completed=true.
+        A fresh completion normally returns a short-lived, single-use welcome
+        sign-in URL. These URLs and mailbox proofs must not appear in management
+        invitation responses or history.
       security: [ { edgeMutualTLS: [] } ]
       requestBody:
         required: true
@@ -566,16 +679,19 @@ paths:
                   required: [email, token, username, display_name, password]
       responses:
         "200":
-          description: Account created; browser hop URL
+          description: Account created or an identical recent completion confirmed
           content:
             application/json:
               schema:
                 type: object
-                properties: { complete_url: { type: string, format: uri } }
+                properties:
+                  complete_url: { type: string, format: uri }
+                  already_completed: { type: boolean }
                 required: [complete_url]
         "401": { description: invalid_client }
-        "403": { description: registration_closed }
-        "409": { description: invitation_gone, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: registration_closed / email_mismatch }
+        "409": { description: invitation_used / invitation_expired / invitation_revoked / invitation_unavailable / registration_completed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: registration_unavailable }
         "422":
           description: field errors / invalid_token
           content:

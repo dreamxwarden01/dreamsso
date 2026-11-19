@@ -3,7 +3,6 @@ import crypto from 'node:crypto';
 import argon2 from 'argon2';
 import { uuidv7 } from 'uuidv7';
 import { pool } from '../db.js';
-import { resolveRegistrationRole } from '../registrationRole.js';
 import { config } from '../config.js';
 import { getSetting, hasSetting } from '../settings.js';
 import { createSession, clientGeo } from '../oidc/sessions.js';
@@ -16,216 +15,171 @@ import { isPortalAssertion } from './reset.js';
 import { mintLoginTicket, redeemLoginTicket } from '../passwordReset.js';
 import { audit } from '../audit.js';
 import {
-  getPending, issuePending, validatePending, dropPending,
+  issuePending, validatePending, dropPending,
   reserveRegistrationSend, releaseRegistrationSend,
-  getLiveInvite, claimInviteUse, consumeInvite,
   registrationLinkValidityMinutes, CODE_RE,
 } from '../registration.js';
 import { changePendingForAddress } from '../emailChange.js';
 
-// Self-serve registration — the SSO owns the ceremony (invitation codes,
-// pending links, rate limits, identity creation, post-signup login ticket);
-// the portal BFF fronts it (Turnstile/edge gate + input validation) over
-// /internal/register/*, portal-client-assertion authed like /internal/reset/*.
-//
-// Check order (user rule): Turnstile at the BFF -> invitation code -> email.
-// The identities table is never consulted without a valid code, so codes are
-// the enumeration boundary. Unlike the reset flow, responses are STATEFUL —
-// a code-holder is semi-trusted, and the user must know the email went out.
-export const registerRouter = Router();
+import { withRoleTransaction } from '../rbac/roleChanges.js';
+import { lockInvitation, validateLockedInvitation, readInvitationPreview, InvitationError } from '../invitations.js';
+import { queueInvitationMail, readInvitationProof, invitationProofHash } from '../invitationMail.js';
+import { commitRegistration } from '../registrationStore.js';
 
+export const registerRouter = Router();
 const siteName = async () => (await getSetting('site_name', 'DreamSSO'))!;
 const portalUrl = async () => (await getSetting('account_portal_url', config.accountPortalUrl))!;
-const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
-
+const qstr = (v: unknown): string => typeof v === 'string' ? v : '';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,20}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const registrationEnabled = async () => (await getSetting('enable_registration','false')) === 'true';
+const invitationRequired = async () => (await getSetting('require_invitation_code','true')) === 'true';
+function fail(res: Response,error: unknown) {
+  if(error instanceof InvitationError) return res.status(error.status).json(error.body);
+  console.warn('registration_unavailable');return res.status(503).json({error:'registration_unavailable'});
+}
+function publicInvitation(row:any) {
+  const status = row.used_at ? 'used' : row.voided_at ? 'revoked' : row.invalidated_at ? 'unavailable'
+    : new Date(row.expires_at).getTime()<=Date.now() ? 'expired' : 'unused';
+  return {code:row.code,label:'Invitation',status,role:{id:row.invited_role_slug,name:row.invited_role_label || row.invited_role_slug},
+    created_at:row.created_at,expires_at:row.expires_at,bound_email:row.bound_email,bound_at:row.bound_at,
+    mail:{state:row.mail_state,at:row.mail_last_at,error_code:row.mail_error_code}};
+}
+async function currentInvitation(code:string) {
+  const row=await readInvitationPreview(pool,code);
+  if(!row)throw new InvitationError(404,'invalid_invitation');
+  return publicInvitation(row);
+}
+async function proofFor(email:string,token:string,includeExpired=false) {
+  const modern = await readInvitationProof(pool,email,token,includeExpired);
+  if(modern) return {code:modern.code,expiresAt:new Date(modern.expires_at),modern:true};
+  const old = await validatePending(email,token);
+  if(!old) return null;
+  return {code:old.code,expiresAt:new Date((old.createdAt+30*60)*1000),modern:false};
+}
 
-const registrationEnabled = async () => (await getSetting('enable_registration', 'false')) === 'true';
-const invitationRequired = async () => (await getSetting('require_invitation_code', 'true')) === 'true';
-
-// POST /internal/register/start {email, code?}
-registerRouter.post('/internal/register/start', async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
-  if (!(await registrationEnabled())) return res.status(403).json({ error: 'registration_closed' });
-
-  const email = qstr(body.email).trim();
-  const code = qstr(body.code).trim().toUpperCase();
-  const needCode = await invitationRequired();
-
-  // 1. invitation code BEFORE anything touches identities (enumeration boundary)
-  let invite = null;
-  if (needCode || code) {
-    if (!CODE_RE.test(code)) return res.status(422).json({ errors: { code: 'invalid_code' } });
-    invite = await getLiveInvite(code);
-    if (!invite) return res.status(422).json({ errors: { code: 'invalid_code' } });
-  }
-
-  // 2. email shape, then uniqueness (citext -> case-insensitive)
-  if (!EMAIL_RE.test(email) || email.length > 254) {
-    return res.status(422).json({ errors: { email: 'invalid_email' } });
-  }
-  const { rows: [taken] } = await pool.query(
-    'SELECT 1 FROM identities WHERE email = $1 AND deleted_at IS NULL', [email],
-  );
-  // A pending email CHANGE reserves its target address too (a registration's
-  // OWN pending must not block its resends, so only the change family here).
-  if (taken || (await changePendingForAddress(email))) {
-    return res.status(422).json({ errors: { email: 'email_taken' } });
-  }
-
-  const [mailFrom, cfAccount, tokenSet] = await Promise.all([
-    getSetting('mail_from'), getSetting('cf_account_id'), hasSetting('cf_api_token'),
-  ]);
-  if (!mailFrom || !cfAccount || !tokenSet) return res.status(503).json({ error: 'email_not_configured' });
-
-  // 3. per-address send limiter (videosite policy: 5/24h, escalating backoff)
-  const slot = await reserveRegistrationSend(email);
-  if (!slot.ok) {
-    return res.status(429).json({ error: 'rate_limited', retry_after: slot.retryAfter, can_retry: slot.canRetry });
-  }
-
-  // 4. claim the code use (same-email resend free; a switch counts; overuse voids)
-  if (invite) {
-    const use = await claimInviteUse(invite, email);
-    if (use === 'voided') {
-      await releaseRegistrationSend(email);
-      return res.status(422).json({ errors: { code: 'invalid_code' } });
-    }
-  }
-
-  const { token } = await issuePending(email, invite ? invite.code : null);
-  const [site, portal] = await Promise.all([siteName(), portalUrl()]);
-  const sent = await sendEmail({
-    to: email,
-    ...renderRegistrationEmail({
-      siteName: site,
-      link: `${portal}/register/complete?email=${encodeURIComponent(email)}&token=${token}`,
-      minutes: registrationLinkValidityMinutes,
-    }),
-  });
-  if (!sent.ok) {
-    await releaseRegistrationSend(email); // nothing arrived — give the slot back
-    return res.status(503).json({ error: 'send_failed' });
-  }
-  res.json({ sent: true, resend_backoff: slot.nextBackoff });
+registerRouter.post('/internal/register/invitation',async(req:Request,res:Response)=>{
+  const body=req.body??{};
+  if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
+  if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
+  const code=qstr(body.code).trim().toUpperCase();
+  if(!CODE_RE.test(code))return res.status(404).json({error:'invalid_invitation'});
+  try{return res.json({invitation:await currentInvitation(code)});}catch(error){return fail(res,error);}
 });
 
-// POST /internal/register/validate {email, token} — is the emailed link usable?
-registerRouter.post('/internal/register/validate', async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
-  if (!(await registrationEnabled())) return res.status(403).json({ error: 'registration_closed' });
-  const email = qstr(body.email).trim();
-  const pending = await validatePending(email, qstr(body.token));
-  if (!pending) return res.status(422).json({ error: 'invalid_token' });
-  // The code must still be alive: an admin void (or overuse) kills the flow.
-  if (pending.code && !(await getLiveInvite(pending.code))) {
-    return res.status(422).json({ error: 'invalid_token' });
+registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>{
+  const body=req.body??{};
+  if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
+  if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
+  const email=qstr(body.email).trim().toLowerCase(),code=qstr(body.code).trim().toUpperCase();
+  if((await invitationRequired()) || code){
+    if(!CODE_RE.test(code))return res.status(422).json({errors:{code:'invalid_code'}});
+    if(body.request_id!==undefined&&!UUID_RE.test(qstr(body.request_id)))return res.status(422).json({error:'invalid_request_id'});
+    try {
+      const result=await withRoleTransaction(async db=>{
+        const row=await lockInvitation(db,code);if(!row)throw new InvitationError(422,'invalid_invitation');
+        await validateLockedInvitation(db,row,email,false);
+        if(!EMAIL_RE.test(email)||email.length>254)throw new InvitationError(422,'invalid_email');
+        if((await db.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount || await changePendingForAddress(email))
+          throw new InvitationError(422,'email_taken');
+        await validateLockedInvitation(db,row,email,true);
+        const locked=(await lockInvitation(db,code))!;
+        const queued=await queueInvitationMail(db,locked,{actorSub:null,requestId:qstr(body.request_id)||crypto.randomUUID(),requireQueued:true});
+        return {queued,invitation:publicInvitation((await lockInvitation(db,code))!)};
+      });
+      const common={email,bound_email:email,expires_at:result.invitation.expires_at,invitation:result.invitation};
+      return res.json({...common,queued:result.queued.queued,sent:result.invitation.mail.state==='sent',resend_backoff:result.queued.retry_after??60});
+    }catch(error){return fail(res,error);}
   }
-  res.json({ valid: true });
+  // Open registration retains its short email-verification flow; invitations use the durable queue above.
+  if(!EMAIL_RE.test(email)||email.length>254)return res.status(422).json({errors:{email:'invalid_email'}});
+  if((await pool.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount||await changePendingForAddress(email))
+    return res.status(422).json({errors:{email:'email_taken'}});
+  const [from,account,configured]=await Promise.all([getSetting('mail_from'),getSetting('cf_account_id'),hasSetting('cf_api_token')]);
+  if(!from||!account||!configured)return res.status(503).json({error:'email_not_configured'});
+  const slot=await reserveRegistrationSend(email);
+  if(!slot.ok)return res.status(429).json({error:'rate_limited',retry_after:slot.retryAfter,can_retry:slot.canRetry});
+  const {token}=await issuePending(email,null);
+  const pending=await validatePending(email,token);
+  const sent=await sendEmail({to:email,...renderRegistrationEmail({siteName:await siteName(),link:`${await portalUrl()}/register/complete?email=${encodeURIComponent(email)}&token=${token}`,
+    expiresAt:new Date(((pending?.createdAt??Math.floor(Date.now()/1000))+registrationLinkValidityMinutes*60)*1000).toISOString()})});
+  if(!sent.ok){await releaseRegistrationSend(email);return res.status(503).json({error:'send_failed'});}
+  return res.json({sent:true,resend_backoff:slot.nextBackoff});
 });
 
-// POST /internal/register/check-username {email, token, username} — on-blur
-// availability for the complete form. Token-gated: not a public oracle.
-registerRouter.post('/internal/register/check-username', async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
-  const email = qstr(body.email).trim();
-  if (!(await validatePending(email, qstr(body.token)))) return res.status(422).json({ error: 'invalid_token' });
-  const username = qstr(body.username).trim();
-  if (!USERNAME_RE.test(username)) return res.status(422).json({ errors: { username: 'invalid_username' } });
-  const { rows: [hit] } = await pool.query(
-    'SELECT 1 FROM identities WHERE username = $1 AND deleted_at IS NULL', [username],
-  );
-  res.json({ available: !hit });
-});
-
-// POST /internal/register/complete {email, token, username, display_name, password}
-registerRouter.post('/internal/register/complete', async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  if (!(await isPortalAssertion(body, { method: req.method, path: req.path }))) return res.status(401).json({ error: 'invalid_client' });
-  if (!(await registrationEnabled())) return res.status(403).json({ error: 'registration_closed' });
-
-  const email = qstr(body.email).trim();
-  const pending = await validatePending(email, qstr(body.token));
-  if (!pending) return res.status(422).json({ error: 'invalid_token' });
-
-  const username = qstr(body.username).trim();
-  const displayName = qstr(body.display_name).trim();
-  const password = qstr(body.password);
-
-  // Aggregate field errors (videosite behavior) so one round trip reports all.
-  const errors: Record<string, string> = {};
-  if (!USERNAME_RE.test(username)) errors.username = 'invalid_username';
-  if (!displayName || displayName.length > 100) errors.display_name = 'invalid_display_name';
-  if (/\s/.test(password) || !passwordComplexityOk(password)) errors.password = 'weak_password';
-  if (Object.keys(errors).length) return res.status(422).json({ errors });
-
-  // Uniqueness (both fields, case-insensitive via citext) — both reported.
-  const { rows: dups } = await pool.query<{ u: boolean; e: boolean }>(
-    `SELECT username = $1 AS u, email = $2 AS e FROM identities
-      WHERE deleted_at IS NULL AND (username = $1 OR email = $2)`,
-    [username, email],
-  );
-  for (const d of dups) {
-    if (d.u) errors.username = 'username_taken';
-    if (d.e) errors.email = 'email_taken';
-  }
-  if (Object.keys(errors).length) return res.status(422).json({ errors });
-
-  // Org role: the invite's choice (validated at creation), else the org default.
-  let roleSlug: string | null = null;
-  if (pending.code) {
-    const invite = await getLiveInvite(pending.code);
-    if (!invite) return res.status(409).json({ error: 'invitation_gone' });
-    roleSlug = invite.invited_role_slug;
-  }
-
-  const sub = uuidv7();
-  const hash = await argon2.hash(password, { type: argon2.argon2id });
-  const c = await pool.connect();
+registerRouter.post('/internal/register/validate',async(req:Request,res:Response)=>{
+  const body=req.body??{};
+  if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
+  if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
+  const email=qstr(body.email).trim().toLowerCase(),proof=await proofFor(email,qstr(body.token),true);
+  if(!proof)return res.status(422).json({error:'invalid_token'});
   try {
-    await c.query('BEGIN');
-    roleSlug = await resolveRegistrationRole(c, roleSlug);
-    // email_verified: the emailed link proved ownership of the address.
-    await c.query(
-      `INSERT INTO identities (sub, username, display_name, email, email_verified, password_hash, password_changed_at)
-       VALUES ($1, $2, $3, $4, true, $5, now())`,
-      [sub, username, displayName, email, hash],
-    );
-    await c.query('INSERT INTO user_org_roles (user_sub, org_role_slug) VALUES ($1, $2)', [sub, roleSlug]);
-    await c.query('COMMIT');
-  } catch (e) {
-    await c.query('ROLLBACK');
-    // TOCTOU: a concurrent duplicate slipped past the SELECT — map, don't 500.
-    if ((e as { code?: string }).code === '23505') {
-      return res.status(422).json({ errors: { username: 'username_taken' } });
-    }
-    if (['55P03', '57014'].includes((e as { code?: string }).code ?? '')) {
-      return res.status(503).json({ error: 'registration_unavailable' });
-    }
-    throw e;
-  } finally {
-    c.release();
-  }
+    const invitation=proof.code?await currentInvitation(proof.code):null;
+    if(invitation&&invitation.status!=='unused')return res.status(409).json({error:'invitation_'+invitation.status,invitation});
+    if(invitation?.bound_email&&invitation.bound_email.toLowerCase()!==email)return res.status(403).json({error:'email_mismatch'});
+    return res.json({valid:true,email,bound_email:invitation?.bound_email??email,expires_at:proof.expiresAt,invitation});
+  }catch(error){return fail(res,error);}
+});
 
-  if (pending.code && !(await consumeInvite(pending.code, sub))) {
-    // Voided between validate and now: the account exists but the invitation is
-    // gone — keep the account (it passed every gate while the code was live).
-    console.warn(`registration: invite ${pending.code} vanished at consume for ${username}`);
-  }
-  await dropPending(email);
-  audit({
-    actorSub: sub, actorLabel: `${displayName} (${username})`,
-    action: 'user.register', detail: { invite: pending.code ?? undefined, role: roleSlug },
-  });
+registerRouter.post('/internal/register/check-username',async(req:Request,res:Response)=>{
+  const body=req.body??{};
+  if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
+  if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
+  const email=qstr(body.email).trim().toLowerCase(),proof=await proofFor(email,qstr(body.token));
+  if(!proof)return res.status(422).json({error:'invalid_token'});
+  try {
+    if(proof.code){const invitation=await currentInvitation(proof.code);if(invitation.status!=='unused')return res.status(409).json({error:'invitation_'+invitation.status});
+      if(invitation.bound_email&&invitation.bound_email.toLowerCase()!==email)return res.status(403).json({error:'email_mismatch'});}
+    const username=qstr(body.username).trim();
+    if(!USERNAME_RE.test(username))return res.status(422).json({errors:{username:'invalid_username'}});
+    return res.json({available:!(await pool.query('SELECT 1 FROM identities WHERE username=$1 AND deleted_at IS NULL',[username])).rowCount});
+  }catch(error){return fail(res,error);}
+});
 
-  const ticket = await mintLoginTicket({
-    sub, amr: ['email'], acr: 'urn:dreamsso:1fa', userLabel: displayName || username,
-  });
-  res.json({ complete_url: `${config.issuer}/welcome?ticket=${ticket}` });
+registerRouter.post('/internal/register/complete',async(req:Request,res:Response)=>{
+  const body=req.body??{};
+  if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
+  if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
+  const email=qstr(body.email).trim().toLowerCase(),token=qstr(body.token),username=qstr(body.username).trim(),displayName=qstr(body.display_name).trim(),password=qstr(body.password);
+  const errors:Record<string,string>={};
+  if(!USERNAME_RE.test(username))errors.username='invalid_username';
+  if(!displayName||displayName.length>100)errors.display_name='invalid_display_name';
+  if(/\s/.test(password)||!passwordComplexityOk(password))errors.password='weak_password';
+  if(Object.keys(errors).length)return res.status(422).json({errors});
+  if(!/^[0-9a-f]{96}$/.test(token))return res.status(422).json({error:'invalid_token'});
+  const proofHash=invitationProofHash(token);
+  // A keyed digest avoids storing an offline password-check oracle in the retry receipt.
+  const receiptKey=Buffer.from(crypto.hkdfSync('sha256',Buffer.from(config.keyEncryptionKey,'hex'),Buffer.alloc(0),'dreamsso:registration-receipt:v1',32));
+  const requestHash=crypto.createHmac('sha256',receiptKey).update(JSON.stringify([email,username,displayName,password])).digest();
+  const previous=(await pool.query('SELECT request_hash FROM registration_completions WHERE proof_hash=$1 AND retry_until>clock_timestamp()',[proofHash])).rows[0];
+  if(previous){if(!Buffer.from(previous.request_hash).equals(requestHash))return res.status(409).json({error:'registration_completed'});
+    return res.json({already_completed:true,complete_url:`${await portalUrl()}/auth/login`});}
+  const proof=await proofFor(email,token);
+  if(!proof)return res.status(422).json({error:'invalid_token'});
+  const sub=uuidv7(),passwordHash=await argon2.hash(password,{type:argon2.argon2id});
+  const db=await pool.connect();let result;
+  try {
+    await db.query('BEGIN');
+    result=await commitRegistration(db,{sub,username,displayName,email,passwordHash,proofHash,requestHash,code:proof.code,proofExpiresAt:proof.expiresAt,modernProof:proof.modern});
+    await db.query('COMMIT');
+  }catch(error){
+    await db.query('ROLLBACK').catch(()=>{});
+    if((error as {code?:string}).code==='23505'){
+      const duplicates=(await pool.query('SELECT username=$1 AS u,email=$2 AS e FROM identities WHERE deleted_at IS NULL AND (username=$1 OR email=$2)',[username,email])).rows;
+      for(const duplicate of duplicates){if(duplicate.u)errors.username='username_taken';if(duplicate.e)errors.email='email_taken';}
+      return res.status(422).json(Object.keys(errors).length?{errors}:{error:'registration_conflict'});
+    }
+    return fail(res,error);
+  }finally{db.release();}
+  if(result.replayed)return res.json({already_completed:true,complete_url:`${await portalUrl()}/auth/login`});
+  // Post-commit Redis/ticket failures must not turn an existing account into an unexplained error.
+  await dropPending(email).catch(()=>{});
+  audit({actorSub:sub,actorLabel:`${displayName} (${username})`,action:'user.register',detail:{invite:proof.code??undefined,role:result.role}});
+  try{
+    const ticket=await mintLoginTicket({sub,amr:['email'],acr:'urn:dreamsso:1fa',userLabel:displayName||username});
+    return res.json({complete_url:`${config.issuer}/welcome?ticket=${ticket}`});
+  }catch{return res.json({already_completed:true,complete_url:`${await portalUrl()}/auth/login`});}
 });
 
 // GET /welcome?ticket= — the browser hop that turns a finished registration

@@ -4,209 +4,257 @@ import { useSite } from '../context/SiteContext.jsx';
 import AuthCard from '../components/AuthCard.jsx';
 import Turnstile from '../components/Turnstile.jsx';
 import Icon from '../components/Icon.jsx';
-import { registerStart } from '../api.js';
+import { registerInvitation, registerStart } from '../api.js';
+import { EMAIL_RE, emailValid, normalizeCode, INVITATION_CODE_RE, invitationStatus,
+  invitationErrorStatus, registrationMessage, registrationRequestId, formatInvitationTime } from '../components/registration/invitation.js';
+import { InvitationMeta, LockedEmail, RecipientButton, RecipientError, RecipientNotice, useRecipientFeedback } from '../components/registration/RecipientUi.jsx';
 
-// Registration step 1: email + invitation code (+ Turnstile). Same blur-
-// validation contract as /forgot. Unlike the reset flow this page is STATEFUL
-// — a code-holder is semi-trusted, so "email taken", "code invalid", rate
-// limits, and delivery failures all surface honestly, and the sent state
-// carries a Resend button on the server-provided backoff countdown.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CODE_RE = /^[A-Z0-9]{12}$/;
-const emailOk = (v) => EMAIL_RE.test(v) && v.length <= 254;
+const TERMINAL_MAIL = ['sent', 'failed', 'unknown'];
 
 export default function RegisterStartPage() {
-  const { registrationEnabled, invitationRequired, turnstileSiteKey, ssoUrl, refreshSite } = useSite();
+  const { siteName, registrationEnabled, invitationRequired, turnstileSiteKey, ssoUrl, refreshSite } = useSite();
   const [params] = useSearchParams();
-  // The SSO's "Sign up" strip carries its login txn — "Sign in" leads BACK to
-  // that exact transaction (unintentional clicks). Direct invite-link visits
-  // have no txn: fall back to the portal sign-in.
+  const suppliedCode = normalizeCode(params.get('code') || '');
   const loginTxn = params.get('txn') || '';
   const signInHref = loginTxn && ssoUrl ? `${ssoUrl}/login?txn=${encodeURIComponent(loginTxn)}` : '/';
-  const signInCta = (
-    <>Already have an account? <a href={signInHref}>Sign in</a></>
-  );
+  const [code, setCode] = useState(suppliedCode);
   const [email, setEmail] = useState('');
-  const [code, setCode] = useState((params.get('code') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12));
-  const [emailErr, setEmailErr] = useState(null); // string message | null
+  const [invitation, setInvitation] = useState(null);
+  const [phase, setPhase] = useState(suppliedCode || invitationRequired ? 'code' : 'form');
+  const [notice, setNotice] = useState(null);
+  const [emailErr, setEmailErr] = useState(null);
   const [codeErr, setCodeErr] = useState(null);
-  const [formErr, setFormErr] = useState(null); // { msg, code } banner
-  const [submitting, setSubmitting] = useState(false);
-  const [phase, setPhase] = useState('form'); // 'form' | 'sent'
-  const [sentTo, setSentTo] = useState('');
-  const [cooldown, setCooldown] = useState(0); // resend backoff countdown (s)
+  const [formErr, setFormErr] = useState(null);
+  const [attemptedEmail, setAttemptedEmail] = useState('');
+  const [uncertain, setUncertain] = useState(false);
+  const [mailState, setMailState] = useState('none');
+  const [sendDoneLabel, setSendDoneLabel] = useState('Queued');
+  const [cooldownUntil, setCooldownUntil] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const [pollPaused, setPollPaused] = useState(false);
+  const [pollError, setPollError] = useState(null);
+  const [pollCycle, setPollCycle] = useState(0);
+  const [checkingStatus, setCheckingStatus] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState(null);
   const resetRef = useRef(null);
+  const previewSeq = useRef(0);
+  const requestRef = useRef(null);
+  const confirmedRequest = useRef(false);
+  const mounted = useRef(true);
+  const feedback = useRecipientFeedback();
 
-  useEffect(() => {
-    if (cooldown <= 0) return undefined;
-    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [cooldown]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; previewSeq.current++; }; }, []);
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
 
-  const codeNeeded = invitationRequired || code.length > 0;
-  // The code is checked on SUBMIT, not by greying the button: a missing or
-  // malformed code used to leave Continue permanently disabled with nothing
-  // said, which reads as a broken page (and is exactly what happens when an
-  // admin turns registration on before creating any invitation code).
-  const canSubmit = emailOk(email.trim()) && !submitting
-    && (!turnstileSiteKey || turnstileToken) && registrationEnabled !== false;
-
-  const submit = async (e) => {
-    e?.preventDefault();
-    if (phase === 'form' && !canSubmit) return;
-    if (phase === 'form' && codeNeeded && !CODE_RE.test(code)) {
-      // Local check — no request, so the single-use Turnstile token survives.
-      setCodeErr(code
-        ? 'Codes are 12 letters and digits.'
-        : 'An invitation code is required. Ask whoever invited you for one.');
-      return;
-    }
-    setSubmitting(true);
-    setFormErr(null);
-    try {
-      const d = await registerStart(email.trim(), codeNeeded ? code : undefined, turnstileToken);
-      setSentTo(email.trim().toLowerCase());
-      setCooldown(d?.resend_backoff ?? 60);
-      setPhase('sent');
-      // Success navigates to the sent card (whose resend widget only mounts once
-      // the cooldown ends) — clear the stale token but don't re-challenge here.
-      setTurnstileToken(null);
-    } catch (err) {
-      const fieldErrs = err.data?.errors || {};
-      // Turnstile is verified first, so any non-2xx means the single-use token is
-      // spent — reset the widget so a retry re-solves for a fresh one.
-      setTurnstileToken(null);
-      resetRef.current?.();
-      if (err.status === 403 && err.code === 'turnstile_failed') {
-        setFormErr({ msg: 'Human verification failed — try again.', code: err.code });
-        if (!turnstileSiteKey) refreshSite();
-      } else if (err.status === 403 && err.code === 'registration_closed') {
-        setFormErr({ msg: 'Registration is currently closed.', code: err.code });
-        refreshSite();
-      } else if (fieldErrs.code) {
-        setCodeErr('This invitation code is invalid, expired, or no longer usable.');
-      } else if (fieldErrs.email === 'email_taken') {
-        setEmailErr('This email address is already registered.');
-      } else if (fieldErrs.email) {
-        setEmailErr('Enter a valid email address.');
-      } else if (err.status === 429) {
-        const mins = Math.ceil((err.data?.retry_after ?? 60) / 60);
-        setFormErr({
-          msg: err.data?.can_retry
-            ? `Too soon — you can resend in ${err.data.retry_after}s.`
-            : `Too many emails for this address — try again in about ${mins} minute${mins === 1 ? '' : 's'}.`,
-          code: 'rate_limited',
-        });
-        if (err.data?.can_retry) setCooldown(err.data.retry_after);
-      } else if (err.status === 400 && err.code === 'already_authenticated') {
-        setFormErr({ msg: "You're already signed in.", code: err.code });
-      } else if (err.status === 503) {
-        setFormErr({
-          msg: err.code === 'email_not_configured'
-            ? 'Email sending isn’t set up yet — contact your administrator.'
-            : 'We couldn’t send the email — try again.',
-          code: err.code,
-        });
-      } else if (err.code === 'timeout') {
-        setFormErr({ msg: 'That took too long — try again.', code: 'timeout' });
-      } else {
-        setFormErr({ msg: 'Something went wrong — try again.', code: err.code || 'http_' + (err.status ?? 'network') });
-      }
-    } finally {
-      setSubmitting(false);
-    }
+  const applyInvitation = (next) => {
+    setInvitation(next);
+    if (next.bound_email) setEmail(next.bound_email);
+    if (next.mail?.state) setMailState(next.mail.state);
+    const state = invitationStatus(next);
+    if (state !== 'unused') setNotice(state || 'unreachable');
   };
 
-  if (registrationEnabled === false) {
-    return (
-      <AuthCard docTitle="Create account">
-        <div className="auth-done"><Icon name="lock" size={26} /></div>
-        <h1 className="auth-h1">Registration is closed</h1>
-        <p className="auth-msg">New accounts can&rsquo;t be created right now. If you were invited, contact the person who invited you.</p>
-        <a className="auth-btn" style={{ display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }} href="/">
-          Return to sign in
-        </a>
-      </AuthCard>
-    );
+  async function preview(requested = code) {
+    if (!INVITATION_CODE_RE.test(requested)) { setCodeErr('Codes are 12 letters and digits.'); return; }
+    const seq = ++previewSeq.current;
+    setPhase('checking'); setFormErr(null); setNotice(null);
+    try {
+      const data = await registerInvitation(requested);
+      if (!mounted.current || seq !== previewSeq.current) return;
+      if (!data?.invitation) throw new Error('invalid_response');
+      const next = data.invitation; applyInvitation(next);
+      const queued = ['queued', 'sending'].includes(next.mail?.state);
+      setPhase(queued && next.bound_email ? 'sent' : 'form');
+      if (queued) setAttemptedEmail(next.bound_email || '');
+    } catch (err) {
+      if (!mounted.current || seq !== previewSeq.current) return;
+      setNotice(err.code === 'registration_closed' ? 'closed' : invitationErrorStatus(err) || 'unreachable');
+      setPhase('code');
+    }
   }
+
+  useEffect(() => {
+    previewSeq.current++; feedback.reset();
+    setCode(suppliedCode); setInvitation(null); setNotice(null); setEmail('');
+    setAttemptedEmail(''); setUncertain(false); setFormErr(null); setPollError(null); setMailState('none');
+    setCheckingStatus(false); setCooldownUntil(0); setPollPaused(false); setSendDoneLabel('Queued');
+    requestRef.current = null; confirmedRequest.current = false;
+    if (suppliedCode) preview(suppliedCode);
+    else setPhase(invitationRequired ? 'code' : 'form');
+    // Only a new link or a changed registration policy starts a new ceremony.
+  }, [suppliedCode, invitationRequired]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // An acknowledged queue is a status, never a permanently busy button. Poll
+  // only its read-only preview, for at most two minutes, then offer manual retry.
+  useEffect(() => {
+    if (phase !== 'sent' || !invitation?.code || !['queued', 'sending'].includes(mailState) || notice || checkingStatus) return undefined;
+    let alive = true, timer;
+    const started = Date.now();
+    setPollPaused(false);
+    const poll = async () => {
+      try {
+        const data = await registerInvitation(invitation.code);
+        if (!alive) return;
+        if (!data?.invitation) throw new Error('invalid_response');
+        applyInvitation(data.invitation); setPollError(null);
+        if (TERMINAL_MAIL.includes(data.invitation.mail?.state) || invitationStatus(data.invitation) !== 'unused') return;
+      } catch {
+        if (!alive) return;
+        setPollError('We could not refresh the email status. The queued request is unchanged.');
+      }
+      if (!alive) return;
+      if (Date.now() - started >= 120000) { setPollPaused(true); return; }
+      timer = setTimeout(poll, 2000);
+    };
+    timer = setTimeout(poll, 2000);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [phase, invitation?.code, mailState, notice, pollCycle, checkingStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const state = invitationStatus(invitation, now);
+  const effectiveNotice = registrationEnabled === false ? 'closed' : notice || (state && state !== 'unused' ? state : null);
+  const boundEmail = invitation?.bound_email || '';
+  const shownEmail = boundEmail || attemptedEmail || email;
+  const cooldown = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
+  const queued = ['queued', 'sending'].includes(mailState);
+  const locked = !!boundEmail || uncertain || feedback.busy;
+  const humanReady = !turnstileSiteKey || !!turnstileToken;
+
+  async function checkStatus() {
+    if (!invitation?.code || checkingStatus) return;
+    const operationSeq = previewSeq.current;
+    setCheckingStatus(true); setFormErr(null);
+    try {
+      const data = await registerInvitation(invitation.code);
+      if (!mounted.current || operationSeq !== previewSeq.current) return;
+      if (!data?.invitation) throw new Error('invalid_response');
+      applyInvitation(data.invitation); setPollCycle((value) => value + 1);
+    } catch (err) {
+      if (mounted.current && operationSeq === previewSeq.current) setFormErr(registrationMessage(err));
+    } finally { if (mounted.current && operationSeq === previewSeq.current) setCheckingStatus(false); }
+  }
+
+  async function submit(event) {
+    event?.preventDefault();
+    if (feedback.held || queued || cooldown > 0 || !humanReady || effectiveNotice) return;
+    const address = (boundEmail || (phase === 'sent' ? attemptedEmail : email)).trim().toLowerCase();
+    if (!emailValid(address)) { setEmailErr(EMAIL_RE.test(address) ? 'Email addresses are at most 254 characters.' : 'Enter a valid email address.'); return; }
+    if ((invitationRequired || code) && !invitation) { await preview(); return; }
+    if (invitation && invitationStatus(invitation) !== 'unused') { setNotice(invitationStatus(invitation)); return; }
+    const operationSeq = previewSeq.current;
+    if (!feedback.start()) return;
+    setFormErr(null); setEmailErr(null); setAttemptedEmail(address);
+    const key = (invitation?.code || '') + ':' + address;
+    if (invitation && (!requestRef.current || requestRef.current.key !== key || (confirmedRequest.current && TERMINAL_MAIL.includes(mailState)))) {
+      requestRef.current = { key, id: registrationRequestId(invitation.code, address, confirmedRequest.current) };
+    }
+    confirmedRequest.current = false;
+    setUncertain(true);
+    try {
+      const data = await registerStart(address, invitation?.code || undefined, turnstileToken, requestRef.current?.id);
+      if (!mounted.current || operationSeq !== previewSeq.current) return;
+      if (data?.queued !== true && data?.sent !== true && !TERMINAL_MAIL.includes(data?.invitation?.mail?.state)) throw new Error('invalid_response');
+      confirmedRequest.current = true; setUncertain(false);
+      if (data?.invitation) applyInvitation(data.invitation);
+      if (data?.bound_email) setEmail(data.bound_email);
+      setCooldownUntil(Date.now() + Math.max(0, Number(data?.resend_backoff) || 60) * 1000);
+      const reportedMail = data.invitation?.mail?.state;
+      const nextMail = data.queued ? (['queued', 'sending', ...TERMINAL_MAIL].includes(reportedMail) ? reportedMail : 'queued')
+        : TERMINAL_MAIL.includes(reportedMail) ? reportedMail : 'sent';
+      setMailState(nextMail); setSendDoneLabel(nextMail === 'sent' ? 'Sent' : 'Queued');
+      setTurnstileToken(null); resetRef.current?.();
+      feedback.finish(['failed', 'unknown'].includes(nextMail) ? 'fail' : 'done', () => setPhase('sent'));
+    } catch (err) {
+      if (!mounted.current || operationSeq !== previewSeq.current) return;
+      let showSendStatus = false;
+      setTurnstileToken(null); resetRef.current?.();
+      if (err.data?.invitation) {
+        applyInvitation(err.data.invitation);
+        showSendStatus = err.data.invitation.mail?.state !== 'none' && !!err.data.invitation.mail?.state;
+      }
+      const ended = invitationErrorStatus(err);
+      if (ended) setNotice(ended);
+      const fields = err.data?.errors || {};
+      if (fields.email === 'email_taken' || err.code === 'email_taken') setEmailErr('This email address is already registered.');
+      else if (fields.email || err.code === 'invalid_email') setEmailErr('Enter a valid email address.');
+      else if (fields.code) { setCodeErr('This invitation code cannot be used.'); setNotice('invalid'); }
+      else setFormErr(registrationMessage(err));
+      if (err.code === 'registration_closed') { setNotice('closed'); refreshSite(); }
+      if (err.code === 'turnstile_failed' && !turnstileSiteKey) refreshSite();
+      if (err.status === 429) setCooldownUntil(Date.now() + Math.max(1, Number(err.data?.retry_after) || 60) * 1000);
+      const definitelyRejected = err.status >= 400 && err.status < 500;
+      if (definitelyRejected || TERMINAL_MAIL.includes(err.data?.invitation?.mail?.state)
+          || (!invitation && ['send_failed', 'email_not_configured'].includes(err.code))) setUncertain(false);
+      // Binding is authoritative even when sending failed. A read can discover
+      // it, but cannot authorize a new UUID for this uncertain operation.
+      if (invitation?.code && !err.data?.invitation) {
+        try {
+          const data = await registerInvitation(invitation.code);
+          if (mounted.current && operationSeq === previewSeq.current && data?.invitation) {
+            applyInvitation(data.invitation);
+            showSendStatus = data.invitation.mail?.state !== 'none' && !!data.invitation.mail?.state;
+          }
+        } catch { /* keep the entered address locked until the request is resolved */ }
+      }
+      feedback.finish('fail', () => { if (showSendStatus) setPhase('sent'); });
+    }
+  }
+
+  if (effectiveNotice) return <AuthCard docTitle="Create account"><RecipientNotice status={effectiveNotice} invitation={invitation}
+    signInHref={signInHref} onRetry={effectiveNotice === 'unreachable' ? () => preview() : undefined} /></AuthCard>;
+  if (phase === 'checking') return <AuthCard docTitle="Create account"><div className="auth-spinner" aria-hidden="true" /><p className="auth-wait">Checking your invitation…</p></AuthCard>;
+  if (phase === 'code') return <AuthCard docTitle="Create account" title="Use your invitation"
+    sub="Enter your invitation code to see the access it offers" cta={<>Already have an account? <a href={signInHref}>Sign in</a></>}>
+    <form className="recipient-form" noValidate onSubmit={(event) => { event.preventDefault(); preview(); }}>
+      <div className={'auth-grp' + (codeErr ? ' bad' : '')}><label htmlFor="reg-code">Invitation code</label>
+        <input id="reg-code" className="auth-input mono" value={code} autoFocus autoComplete="off" autoCapitalize="characters" maxLength={12}
+          onChange={(event) => { setCode(normalizeCode(event.target.value)); setCodeErr(null); }} />
+        <span className="auth-ferr">{codeErr}</span></div>
+      <button type="submit" className="auth-btn">Continue</button>
+      {!invitationRequired && <button type="button" className="auth-alt" onClick={() => { setCode(''); setCodeErr(null); setPhase('form'); }}>Continue without an invitation</button>}
+      <RecipientError error={formErr} />
+    </form>
+  </AuthCard>;
 
   if (phase === 'sent') {
-    return (
-      <AuthCard docTitle="Create account">
-        <div className="auth-done"><Icon name="mail" size={26} /></div>
-        <h1 className="auth-h1">Check your email</h1>
-        <p className="auth-msg">
-          We&rsquo;ve sent a link to <strong>{sentTo}</strong>. Open it to choose your username
-          and password. The link expires in 30 minutes.
-        </p>
-        {formErr && <div className="auth-err">{formErr.msg} [{formErr.code}]</div>}
-        {/* Only mount the widget once the resend button is actually clickable —
-            no point solving a challenge (or letting one expire) during the wait. */}
-        {cooldown <= 0 && (
-          <Turnstile
-            onToken={setTurnstileToken}
-            onExpire={() => setTurnstileToken(null)}
-            onError={() => setTurnstileToken(null)}
-            resetRef={resetRef}
-          />
-        )}
-        <button
-          type="button" className="auth-btn"
-          disabled={cooldown > 0 || submitting || (!!turnstileSiteKey && !turnstileToken)}
-          onClick={submit}
-        >
-          {submitting ? 'Sending…' : cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend the link'}
-        </button>
-        <p className="auth-msg" style={{ fontSize: 13, color: 'var(--faint)', marginTop: 12 }}>
-          Wrong address? <a href="#form" onClick={(e) => { e.preventDefault(); setPhase('form'); setFormErr(null); }}>Start over</a>
-        </p>
-      </AuthCard>
-    );
+    const failed = mailState === 'failed';
+    const unknown = mailState === 'unknown';
+    const title = queued ? 'Email queued' : uncertain ? 'Request not confirmed' : failed ? 'Email not sent' : unknown ? 'Email status unknown' : 'Check your email';
+    const intro = queued ? 'Your registration email is queued for sending to '
+      : uncertain ? 'We could not confirm the request for '
+        : failed ? 'The latest email could not be sent to ' : unknown ? 'The send result could not be confirmed for ' : 'The mail provider accepted a registration link for ';
+    return <AuthCard docTitle="Create account"><div className="auth-done recipient-notice info"><Icon name="mail" size={26} /></div>
+      <h1 className="auth-h1">{title}</h1><p className="auth-msg">{intro}<strong>{shownEmail}</strong>.</p>
+      {invitation ? <p className="auth-msg">This invitation stays reserved for that address. The link works until {formatInvitationTime(invitation.expires_at)}; sending again does not extend its deadline.</p>
+        : <p className="auth-msg">Open the link to choose your username and password. It expires in 30 minutes.</p>}
+      {queued && <p className="recipient-queued">{pollPaused ? 'It is still queued. Check the status again shortly.' : 'We are checking the send status. This does not mean the email was delivered.'}</p>}
+      {(queued || uncertain) && <button type="button" className="auth-alt" disabled={checkingStatus} onClick={checkStatus}>{checkingStatus ? 'Checking status…' : 'Check status'}</button>}
+      {!queued && cooldown <= 0 && <Turnstile onToken={setTurnstileToken} onExpire={() => setTurnstileToken(null)} onError={() => setTurnstileToken(null)} resetRef={resetRef} />}
+      <RecipientButton type="button" onClick={submit} feedback={feedback} rest={queued ? 'Queued for sending' : cooldown > 0 ? `Resend in ${cooldown}s` : uncertain ? 'Retry request' : 'Resend email'}
+        done={sendDoneLabel} fail="Not sent" disabled={queued || cooldown > 0 || !humanReady} />
+      <RecipientError error={formErr || pollError || (failed ? 'We could not send the email. Try sending again to the same address.' : unknown ? 'A previous email may still arrive. You can request another for the same address.' : null)} />
+      {invitation ? <p className="recipient-meta">Wrong address? Ask the person who invited you for a new invitation. This one cannot move to another address.</p>
+        : <a className="recipient-signin" href="/register/start">Use a different address</a>}
+      <InvitationMeta invitation={invitation} />
+    </AuthCard>;
   }
 
-  return (
-    <AuthCard
-      docTitle="Create account"
-      title="Create your account"
-      sub="Enter your email address and invitation code to get started"
-      cta={signInCta}
-    >
-      {formErr && <div className="auth-err">{formErr.msg} [{formErr.code}]</div>}
-      <form onSubmit={submit} noValidate>
-        <div className={'auth-grp' + (emailErr ? ' bad' : '')}>
-          <label htmlFor="reg-email">Email Address</label>
-          <input
-            id="reg-email" className="auth-input" autoFocus
-            autoCapitalize="none" autoCorrect="off" spellCheck="false" autoComplete="email"
-            value={email}
-            onChange={(e) => { setEmail(e.target.value.replace(/\s/g, '')); setEmailErr(null); }}
-            onBlur={() => { const v = email.trim(); if (v && !emailOk(v)) setEmailErr('Enter a valid email address.'); }}
-          />
-          <span className="auth-ferr">{emailErr || 'Enter a valid email address.'}</span>
-        </div>
-        <div className={'auth-grp' + (codeErr ? ' bad' : '')}>
-          <label htmlFor="reg-code">Invitation Code{invitationRequired ? '' : ' (optional)'}</label>
-          <input
-            id="reg-code" className="auth-input mono"
-            autoCapitalize="characters" autoCorrect="off" spellCheck="false" autoComplete="off"
-            placeholder="ABCD1234EFGH" maxLength={12}
-            value={code}
-            onChange={(e) => { setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12)); setCodeErr(null); }}
-            onBlur={() => { if (code && !CODE_RE.test(code)) setCodeErr('Codes are 12 letters and digits.'); }}
-          />
-          <span className="auth-ferr">{codeErr || 'Codes are 12 letters and digits.'}</span>
-        </div>
-        <Turnstile
-          onToken={setTurnstileToken}
-          onExpire={() => setTurnstileToken(null)}
-          onError={() => setTurnstileToken(null)}
-          resetRef={resetRef}
-        />
-        <button type="submit" className="auth-btn" disabled={!canSubmit}>
-          {submitting ? 'Sending…' : 'Continue'}
-        </button>
-      </form>
-    </AuthCard>
-  );
+  return <AuthCard docTitle="Create account" title={invitation ? `Join ${siteName || 'DreamSSO'}` : 'Create your account'}
+    sub={invitation ? `${invitation.role?.name ? `You are invited as a ${invitation.role.name}.` : 'You are invited.'} ${boundEmail ? 'Send a registration link to your invited address.' : 'Enter your email to get a registration link.'}` : 'Enter your email address to get started'}
+    cta={<>Already have an account? <a href={signInHref}>Sign in</a></>}>
+    {invitation && <div className="auth-chip"><span>Invitation <code>{invitation.code}</code></span></div>}
+    <form className="recipient-form" noValidate onSubmit={submit}>
+      {boundEmail ? <LockedEmail email={boundEmail} /> : <div className={'auth-grp' + (emailErr ? ' bad' : '')}>
+        <label htmlFor="reg-email">Email address</label><input id="reg-email" type="email" inputMode="email" className="auth-input" autoFocus autoComplete="email" autoCapitalize="none" autoCorrect="off" spellCheck="false" maxLength={254}
+          readOnly={locked} value={email} onChange={(event) => { setEmail(event.target.value.replace(/\s/g, '')); setEmailErr(null); }}
+          onBlur={() => { if (email && !emailValid(email.trim())) setEmailErr('Enter a valid email address.'); }} />
+        <span className="auth-ferr">{emailErr}</span>
+        {invitation && <span className="recipient-hint">The first address submitted is tied to this invitation permanently.</span>}
+      </div>}
+      <Turnstile onToken={setTurnstileToken} onExpire={() => setTurnstileToken(null)} onError={() => setTurnstileToken(null)} resetRef={resetRef} />
+      <RecipientButton type="submit" feedback={feedback} rest={uncertain ? 'Retry request' : 'Send registration email'} done={invitation ? sendDoneLabel : 'Sent'} fail="Not sent" disabled={!emailValid((boundEmail || email).trim()) || !humanReady || cooldown > 0} />
+      <RecipientError error={formErr || emailErr} />
+    </form>
+    {!invitation && !invitationRequired && <button type="button" className="auth-alt" onClick={() => setPhase('code')}>Use an invitation code</button>}
+    <InvitationMeta invitation={invitation} />
+  </AuthCard>;
 }

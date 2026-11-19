@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { redis } from './redis.js';
 import { pool } from './db.js';
 
-// Self-serve registration state — Redis for the hot path (like passwordReset):
+// Short-lived open-registration state and compatibility for existing email links:
 //   reg:pending:<email>   the one in-flight registration per address:
 //                         {token, code|null, createdAt, lastSent}. TTL = link
 //                         validity (30 min) anchored at CREATION; a resend
@@ -13,15 +13,14 @@ import { pool } from './db.js';
 //                         (0/60/120/180/240s). Reserve-then-send; a failed
 //                         send releases the slot. Deny returns retry_after +
 //                         whether retrying can ever succeed inside the window.
-// Invitation codes are Postgres (invitation_codes) — the consumed record must
-// outlive Redis.
+// New invitations use the PostgreSQL lifecycle and durable mail queue; their
+// binding and proof deadline do not depend on these short-lived Redis records.
 
 const TOKEN_TTL_SECONDS = 30 * 60;
 const TOKEN_REUSE_SECONDS = 5 * 60;
 const RL_MAX_SENDS = 5;
 const RL_WINDOW_SECONDS = 24 * 3600;
 const RL_BACKOFFS = [0, 60, 120, 180, 240]; // seconds, indexed by sends-so-far
-export const MAX_CODE_USES = 3; // email SWITCHES per code; the 4th voids it
 export const registrationLinkValidityMinutes = TOKEN_TTL_SECONDS / 60;
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
@@ -47,22 +46,29 @@ export async function issuePending(
   code: string | null,
 ): Promise<{ token: string; reused: boolean }> {
   const now = Math.floor(Date.now() / 1000);
-  const cur = await getPending(email);
-  if (cur && cur.code === code && now - cur.lastSent < TOKEN_REUSE_SECONDS) {
-    await redis.set(pendKey(email), JSON.stringify({ ...cur, lastSent: now }), 'KEEPTTL');
-    return { token: cur.token, reused: true };
-  }
   const token = crypto.randomBytes(48).toString('hex');
-  const rec: PendingRegistration = { token, code, createdAt: now, lastSent: now };
-  await redis.set(pendKey(email), JSON.stringify(rec), 'EX', TOKEN_TTL_SECONDS);
-  return { token, reused: false };
+  const value = JSON.stringify({token,code,createdAt:now,lastSent:now});
+  const raw = await redis.eval(`
+    local raw=redis.call('GET',KEYS[1])
+    if raw then
+      local ok,old=pcall(cjson.decode,raw)
+      if ok and old.code==cjson.decode(ARGV[1]).code and tonumber(old.createdAt) and tonumber(old.lastSent)
+         and tonumber(ARGV[2])-old.createdAt<tonumber(ARGV[3]) and tonumber(ARGV[2])-old.lastSent<tonumber(ARGV[4])
+         and redis.call('TTL',KEYS[1])>0 then
+        old.lastSent=tonumber(ARGV[2]);redis.call('SET',KEYS[1],cjson.encode(old),'KEEPTTL');return cjson.encode(old)
+      end
+    end
+    redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[3]);return ARGV[1]
+  `,1,pendKey(email),value,String(now),String(TOKEN_TTL_SECONDS),String(TOKEN_REUSE_SECONDS)) as string;
+  const rec=JSON.parse(raw) as PendingRegistration;
+  return {token:rec.token,reused:rec.token!==token};
 }
 
 // Constant-ish time token check; the pending row stays until consumed/evicted.
 export async function validatePending(email: string, token: string): Promise<PendingRegistration | null> {
   if (typeof token !== 'string' || token.length < 32 || token.length > 128) return null;
   const cur = await getPending(email);
-  if (!cur) return null;
+  if (!cur || !Number.isFinite(cur.createdAt) || Math.floor(Date.now()/1000)-cur.createdAt >= TOKEN_TTL_SECONDS) return null;
   const a = Buffer.from(sha256(cur.token));
   const b = Buffer.from(sha256(token));
   return crypto.timingSafeEqual(a, b) ? cur : null;
@@ -121,87 +127,10 @@ export async function releaseRegistrationSend(email: string): Promise<void> {
   await redis.eval(RELEASE_LUA, 1, rlKey(email));
 }
 
-// --- invitation codes (Postgres; consumed rows are permanent records) ---
-
-const CODE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+// Invitation lifecycle is stored in invitations.ts. Codes remain displayable audit IDs.
 export const CODE_RE = /^[A-Z0-9]{12}$/;
-
 export function generateInviteCode(): string {
-  const bytes = crypto.randomBytes(12);
-  let out = '';
-  for (const b of bytes) out += CODE_CHARSET[b % CODE_CHARSET.length];
-  return out;
-}
-
-export interface LiveInvite {
-  code: string;
-  invited_role_slug: string | null;
-  use_count: number;
-  pending_email: string | null;
-}
-
-// A code usable at /register/start: exists, unconsumed, unvoided, unexpired.
-export async function getLiveInvite(code: string): Promise<LiveInvite | null> {
-  if (!CODE_RE.test(code)) return null;
-  const { rows: [r] } = await pool.query<LiveInvite>(
-    `SELECT code, invited_role_slug, use_count, pending_email
-       FROM invitation_codes
-      WHERE code = $1 AND used_by IS NULL AND voided_at IS NULL AND expires_at > now()`,
-    [code],
-  );
-  return r ?? null;
-}
-
-// Void = mark, don't delete (user design): the row stays VISIBLE for 24h
-// (voided_at distinguishes it from merely expired), then the sweeper clears
-// it. Kills any in-flight pending link. Shared by the org-page void and the
-// overuse auto-void (possibly a compromised code).
-export async function voidInvite(code: string, pendingEmail: string | null): Promise<void> {
-  if (pendingEmail) await dropPending(pendingEmail);
-  await pool.query(
-    `UPDATE invitation_codes
-        SET voided_at = now(), clear_at = now() + interval '24 hours',
-            pending_email = NULL, pending_at = NULL
-      WHERE code = $1 AND used_by IS NULL AND voided_at IS NULL`,
-    [code],
-  );
-}
-
-// Claim a use for `email`. Same-address resend is free; a switch increments
-// use_count, evicts the previous address's pending registration, and past the
-// cap VOIDS the code. Returns what happened.
-export async function claimInviteUse(
-  invite: LiveInvite,
-  email: string,
-): Promise<'resend' | 'claimed' | 'voided'> {
-  if (invite.pending_email && invite.pending_email.toLowerCase() === email.toLowerCase()) {
-    await pool.query('UPDATE invitation_codes SET pending_at = now() WHERE code = $1', [invite.code]);
-    return 'resend';
-  }
-  if (invite.use_count >= MAX_CODE_USES) {
-    await voidInvite(invite.code, invite.pending_email);
-    return 'voided';
-  }
-  if (invite.pending_email) await dropPending(invite.pending_email);
-  await pool.query(
-    `UPDATE invitation_codes SET use_count = use_count + 1, pending_email = $2, pending_at = now()
-      WHERE code = $1`,
-    [invite.code, email],
-  );
-  return 'claimed';
-}
-
-// Consume at completion — the permanent record (clear_at NULL = keep forever).
-// Fails when the code was voided mid-flow so the registration refuses.
-export async function consumeInvite(code: string, sub: string): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `UPDATE invitation_codes
-        SET used_by = $2, used_at = now(), clear_at = NULL,
-            pending_email = NULL, pending_at = NULL
-      WHERE code = $1 AND used_by IS NULL AND voided_at IS NULL`,
-    [code, sub],
-  );
-  return (rowCount ?? 0) > 0;
+  return Array.from({length:12},()=> 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[crypto.randomInt(36)]).join('');
 }
 
 // A live pending registration reserves its address system-wide: admin
@@ -217,19 +146,9 @@ export async function emailReserved(email: string): Promise<boolean> {
   return (await pendingEmailExists(email)) || (await changePendingForAddress(email));
 }
 
-// Hourly sweep: clear stale pending stamps (their Redis rows are long gone),
-// then delete rows past their clear_at (expired-unused after expiry+24h,
-// voided after void+24h). Consumed rows have clear_at NULL — kept forever.
+// Invitation records and their immutable email bindings are retained permanently.
+// Only expired private delivery material and short-lived completion receipts are pruned.
 export async function sweepInvitations(): Promise<void> {
-  try {
-    await pool.query(
-      `UPDATE invitation_codes SET pending_email = NULL, pending_at = NULL
-        WHERE pending_at IS NOT NULL AND pending_at < now() - interval '40 minutes'`,
-    );
-    await pool.query(
-      `DELETE FROM invitation_codes WHERE clear_at IS NOT NULL AND clear_at < now()`,
-    );
-  } catch (e) {
-    console.error('sweepInvitations failed:', (e as Error).message);
-  }
+  await pool.query("UPDATE invitation_mail_jobs SET payload_enc=NULL WHERE expires_at<clock_timestamp() AND payload_enc IS NOT NULL");
+  await pool.query("DELETE FROM registration_completions WHERE retry_until<clock_timestamp()");
 }

@@ -117,20 +117,20 @@ export function renderPasswordChangedEmail(p: {
 export function renderRegistrationEmail(p: {
   siteName: string;
   link: string;
-  minutes: number;
+  minutes?: number;
+  expiresAt?: string;
 }): { subject: string; html: string; text: string } {
+  const expiry = p.expiresAt
+    ? `This registration link expires at ${new Date(p.expiresAt).toUTCString()}. Resending does not extend its validity.`
+    : `This link expires in ${p.minutes ?? 30} minutes.`;
   return {
     subject: `Finish creating your ${p.siteName} account`,
-    html: emailShell({
-      siteName: p.siteName,
-      title: 'Finish creating your account',
-      bodyHtml:
-        paragraph(`You're almost there — open the link below to choose your username and password.`) +
-        button(p.link, 'Create my account') +
-        paragraph(`This link expires in ${p.minutes} minutes.`),
-      footerNote: "If you didn't request this, you can ignore this email — no account was created.",
+    html: emailShell({ siteName: p.siteName, title: 'Finish creating your account',
+      bodyHtml: paragraph("Open the link below to choose your username and password.") +
+        button(p.link, 'Create my account') + paragraph(esc(expiry)),
+      footerNote: "If you weren't expecting this invitation, you can ignore it — no account was created.",
     }),
-    text: `Finish creating your account\n\nOpen this link to choose your username and password (expires in ${p.minutes} minutes):\n\n${p.link}\n\nIf you didn't request this, you can ignore this email — no account was created.\n\nSent by ${p.siteName}.`,
+    text: `Finish creating your account\n\nOpen this link to choose your username and password:\n\n${p.link}\n\n${expiry}\n\nIf you weren't expecting this invitation, you can ignore it — no account was created.\n\nSent by ${p.siteName}.`,
   };
 }
 

@@ -70,6 +70,31 @@ Database tests use the `orbstack` Docker context by default. Set
 own database and credentials and removes the container afterward. Feature scripts
 under `scripts/` may require a separately configured test instance.
 
+## Invitations and sign-up
+
+The account portal's Organization area manages single-use invitations with a role,
+optional recipient email and a short note. Choose **Email invitation** or **Copy link /
+invitation code**. Invitations default to 72 hours; the portal offers 24-hour, 3-day,
+and 7-day presets. A shared link still requires mailbox verification.
+
+An email supplied at creation is fixed. Otherwise, the first accepted registration-email
+request binds the invitation to that address; changing it requires a new invitation.
+Resending keeps the original deadline. Revocation, expiry, deletion of the offered
+role, or loss of the creator's invitation authority prevents an unused invitation
+from completing. Existing accounts are unaffected. Account creation, role assignment
+and invitation consumption commit together.
+
+Mail status is separate from invitation status: queued or sending does not mean
+sent, and sent means the provider accepted the message. Failed or uncertain sends
+remain visible and can be explicitly retried. A send failure does not revoke the
+invitation. Management requests use request IDs so a response retry does not create
+a second invitation or queue a second send.
+
+The list provides All, Current and History views, server-side search and sorting,
+and pages of 10, 25 or 100 records. Used, expired, revoked and invalid invitations
+remain in history. Invitation IDs and codes can be displayed; mailbox verification
+links remain private to the recipient.
+
 ## Role synchronization
 
 Relying parties publish persistent, versioned catalog snapshots. Role updates and

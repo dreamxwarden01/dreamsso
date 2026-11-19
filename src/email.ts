@@ -40,13 +40,17 @@ export async function sendEmail(args: SendEmailArgs): Promise<SendResult> {
     return { ok: false, reason: 'unreachable' };
   }
 
-  const body = (await r.json().catch(() => null)) as {
+  let decoded: unknown;
+  try { decoded = await r.json(); } catch { return {ok:false,reason:'unknown'}; }
+  if(r.status >= 500 || r.status===408 || r.status===429) return {ok:false,reason:'unknown'};
+  const body = decoded as {
     success?: boolean;
     errors?: { message?: string }[];
     result?: { permanent_bounces?: string[] };
   } | null;
 
-  if (!r.ok || !body?.success) {
+  if (!body || typeof body.success!=='boolean') return {ok:false,reason:'unknown'};
+  if (!r.ok || !body.success) {
     const detail = body?.errors?.[0]?.message;
     console.warn(`sendEmail: rejected (HTTP ${r.status})`, detail ?? '');
     return { ok: false, reason: 'rejected', detail };

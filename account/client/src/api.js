@@ -18,11 +18,19 @@ export function setStepUpRequiredHandler(fn) {
 // Thin client for the BFF. A 401 means "no server session" -> bounce to the
 // BFF login (which round-trips the SSO and returns here).
 async function req(path, opts = {}) {
-  const r = await fetch(path, {
+  const {timeoutMs = 15000, signal, ...requestOptions} = opts;
+  const deadline = AbortSignal.timeout(timeoutMs);
+  let r;
+  try { r = await fetch(path, {
     credentials: 'same-origin',
     headers: { accept: 'application/json', ...(opts.body ? { 'content-type': 'application/json' } : {}) },
-    ...opts,
-  });
+    ...requestOptions,
+    signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+  }); } catch (cause) {
+    if (signal?.aborted) throw cause;
+    const code = deadline.aborted || cause?.name === 'TimeoutError' ? 'request_timeout' : 'network_error';
+    throw Object.assign(new Error(code), { code, status: 0, uncertain: true });
+  }
   if (r.status === 401) {
     const rt = encodeURIComponent(location.pathname + location.search);
     location.href = '/auth/login?returnTo=' + rt;
@@ -93,8 +101,8 @@ export const stepupSendEmail = () => req('/api/stepup/send-email', { method: 'PO
 
 // Org management — generic helper: the BFF passes /api/org/* straight through
 // to the SSO's /account/org/*.
-export const orgApi = (method, path, body) =>
-  req('/api/org' + path, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+export const orgApi = (method, path, body, options = {}) =>
+  req('/api/org' + path, { ...options, method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 export const getOrgDashboard = () => req('/api/org/dashboard');
 export const getOrgLogs = ({ cursor, includeCleared, limit } = {}) => {
   const u = new URLSearchParams();
@@ -119,7 +127,7 @@ export const terminateOtherSessions = () =>
 // button can't lock forever) instead of hanging — the caller then unlocks and
 // re-solves the widget for a fresh token.
 const SUBMIT_TIMEOUT_MS = 5000;
-async function reqPublic(path, body, { timeoutMs } = {}) {
+async function reqPublic(path, body, { timeoutMs = SUBMIT_TIMEOUT_MS } = {}) {
   let r;
   try {
     r = await fetch(path, {
@@ -168,12 +176,13 @@ export const usernameChangeCheck = (newUsername) =>
 export const verifyEmail = (token) => reqPublic('/api/verify-email', { token });
 
 // --- registration (public, invitation-gated upstream) ---
-export const registerStart = (email, code, turnstileToken) =>
-  reqPublic('/api/register/start', { email, code: code || undefined, turnstile_token: turnstileToken ?? undefined }, { timeoutMs: SUBMIT_TIMEOUT_MS });
+export const registerInvitation = (code) => reqPublic('/api/register/invitation', {code});
+export const registerStart = (email, code, turnstileToken, requestId) =>
+  reqPublic('/api/register/start', { email, code: code || undefined, request_id: requestId, turnstile_token: turnstileToken ?? undefined }, { timeoutMs: SUBMIT_TIMEOUT_MS });
 export const registerValidate = (email, token) => reqPublic('/api/register/validate', { email, token });
 export const registerCheckUsername = (email, token, username) =>
   reqPublic('/api/register/check-username', { email, token, username });
-export const registerComplete = (body) => reqPublic('/api/register/complete', body, { timeoutMs: SUBMIT_TIMEOUT_MS });
+export const registerComplete = (body) => reqPublic('/api/register/complete', body, { timeoutMs: 15000 });
 
 // --- profile picture ---
 export const avatarUrl = (f) => '/api/avatar/' + encodeURIComponent(f);

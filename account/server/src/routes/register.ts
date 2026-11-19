@@ -3,13 +3,11 @@ import { getSession } from '../session.js';
 import { SESSION_COOKIE } from './auth.js';
 import { enforceTurnstileGate, s2sPost, mirror } from './reset.js';
 
-// Public (no session) registration API for /register/start + /register/complete.
-// The BFF is the Turnstile gate; the SSO owns everything real (codes, pending
-// links, rate limits, identity creation, login ticket). Check order is the
-// user's rule — Turnstile FIRST, then invitation code, then email — so the
-// identities table is never consulted without a human + a valid code. Unlike
-// the reset flow, responses are STATEFUL: the visitor holds a code and must
-// know whether the email actually went out.
+// Public registration API for /register/start + /register/complete. The BFF
+// gates mail sends and account creation with Turnstile; read-only invitation
+// previews and mailbox-proof checks do not need another human challenge. The
+// SSO owns binding, deadlines, delivery, quotas, identity creation and tickets.
+// Mutations retain Turnstile -> invitation -> recipient-email validation order.
 export const registerRouter = Router();
 
 const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -17,7 +15,21 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_RE = /^[A-Z0-9]{12}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,20}$/;
 
-// POST /api/register/start {email, code?, turnstile_token?}
+// Read-only, code-keyed invitation preview. Opening a page never binds an
+// address, sends mail or consumes the invitation; no Turnstile is needed.
+registerRouter.post('/api/register/invitation', async (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const code = qstr((req.body ?? {}).code).trim().toUpperCase().replace(/\s/g, '');
+    if (!CODE_RE.test(code)) return res.status(422).json({ error: 'invalid_invitation' });
+    await mirror(res, await s2sPost('/internal/register/invitation', { code }));
+  } catch (e) {
+    console.error('register invitation proxy failed:', (e as Error).message);
+    res.status(502).json({ error: 'upstream_unreachable' });
+  }
+});
+
+// POST /api/register/start {email, code?, request_id?, turnstile_token?}
 registerRouter.post('/api/register/start', async (req: Request, res: Response) => {
   try {
     // Turnstile FIRST — single-use token, consumed on every request incl. the
@@ -39,7 +51,9 @@ registerRouter.post('/api/register/start', async (req: Request, res: Response) =
       return res.status(422).json({ errors: { email: 'invalid_email' } });
     }
 
-    await mirror(res, await s2sPost('/internal/register/start', { email, code: code || undefined }));
+    await mirror(res, await s2sPost('/internal/register/start', {
+      email, code: code || undefined, request_id: qstr(body.request_id) || undefined,
+    }));
   } catch (e) {
     console.error('register start proxy failed:', (e as Error).message);
     res.status(502).json({ error: 'upstream_unreachable' });
