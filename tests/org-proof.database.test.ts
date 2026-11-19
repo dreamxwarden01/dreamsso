@@ -22,7 +22,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
   const admin = new pg.Pool({ connectionString, max: 2 });
   const database = new pg.Pool({ connectionString, max: 1, connectionTimeoutMillis: 1000,
     options: `-c search_path=${schema},public`, application_name: schema });
-  const actor = randomUUID(), other = randomUUID(), sid = randomUUID(), otherSid = randomUUID();
+  const actor = randomUUID(), other = randomUUID(), sid = randomUUID(), sameUserSid = randomUUID(), otherSid = randomUUID();
   const keys = await generateKeyPair('EdDSA'), jwk = await exportJWK(keys.publicKey);jwk.kid = 'generated-proof-key';
   const sign = async (scope = 'profile', expired = false) => {
     const now = Math.floor(Date.now() / 1000);
@@ -46,7 +46,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
     // Verification reads only the generated public JWK. The private-key column
     // deliberately contains unusable synthetic bytes and is never decrypted.
     await database.query("INSERT INTO signing_keys(kid,public_jwk,private_key_enc,status) VALUES($1,$2,$3,'current')", [jwk.kid, jwk, Buffer.from('synthetic-not-a-private-key')]);
-    for (const [session, sub] of [[sid, actor], [otherSid, other]]) await database.query(`INSERT INTO sessions(sid,user_sub,token_hash,stepup_at,stepup_method,expires_at)
+    for (const [session, sub] of [[sid, actor], [sameUserSid, actor], [otherSid, other]]) await database.query(`INSERT INTO sessions(sid,user_sub,token_hash,stepup_at,stepup_method,expires_at)
       VALUES($1,$2,$3,now(),'totp',now()+interval '1 day')`, [session, sub, randomBytes(32)]);
     await database.query("INSERT INTO totp_credentials(user_sub,secret_enc,confirmed_at) VALUES($1,$2,now())", [actor, Buffer.from('synthetic-not-a-totp-secret')]);
     await database.query("INSERT INTO settings(key,value) VALUES('stepup_portal_required','true'),('stepup_validity_minutes','30')");
@@ -59,8 +59,31 @@ test('transactional org proof never needs a second pool connection and rechecks 
       await assert.rejects(proof(await request('email')), denied('insufficient_scope'));
       const wrongSubject = await request();wrongSubject.auth!.sub = other;
       await assert.rejects(proof(wrongSubject), denied('invalid_token', 401));
-      await assert.rejects(proof(await request('profile', false, otherSid)), denied('step_up_required'));
-      await assert.rejects(proof(await request('profile', false, '')), denied('step_up_required'));assert.equal(escapedReads, 0);
+      await assert.rejects(proof(await request('profile', false, otherSid)), denied('session_context_mismatch'));
+      await assert.rejects(proof(await request('profile', false, '')), denied('session_context_mismatch'));assert.equal(escapedReads, 0);
+    });
+    await t.test('another fresh session for the same user cannot supply this bearer session proof', async () => {
+      await database.query("UPDATE sessions SET stepup_at=now()-interval '2 hours' WHERE sid=$1", [sid]);
+      try {
+        await assert.rejects(proof(await request('profile', false, sameUserSid)), denied('session_context_mismatch'));
+        await assert.rejects(proof(await request()), denied('step_up_required'));
+        assert.equal(escapedReads, 0);
+      } finally { await database.query('UPDATE sessions SET stepup_at=now() WHERE sid=$1', [sid]); }
+    });
+    await t.test('expired original SID remains401 before a different session context is considered', async () => {
+      await database.query("UPDATE sessions SET last_seen=now()-interval '200 hours' WHERE sid=$1", [sid]);
+      try { await assert.rejects(proof(await request('profile', false, sameUserSid)), denied('invalid_token', 401)); }
+      finally { await database.query('UPDATE sessions SET last_seen=now() WHERE sid=$1', [sid]); }
+    });
+    await t.test('stepup off permits an absent header but still rejects an explicitly different current SID', async () => {
+      await database.query("UPDATE settings SET value='false' WHERE key='stepup_portal_required'");
+      try {
+        const absent = await request('profile', false, '');delete absent.headers['x-stepup-sid'];
+        await proof(absent);
+        await assert.rejects(proof(await request('profile', false, '')), denied('session_context_mismatch'));
+        await assert.rejects(proof(await request('profile', false, sameUserSid)), denied('session_context_mismatch'));
+        assert.equal(escapedReads, 0);
+      } finally { await database.query("UPDATE settings SET value='true' WHERE key='stepup_portal_required'"); }
     });
     await t.test('owned passkey preempts TOTP, unconfirmed factors and weak proof do not satisfy org access', async () => {
       await database.query('INSERT INTO webauthn_credentials(user_sub,credential_id,public_key) VALUES($1,$2,$3)', [actor, randomBytes(32), Buffer.from('synthetic-public-key')]);
@@ -82,7 +105,7 @@ test('transactional org proof never needs a second pool connection and rechecks 
       globalPool.query = (async () => { escapedReads++;throw new Error('Proof escaped the transaction connection.'); }) as typeof globalPool.query;
       await database.query("UPDATE settings SET value='true' WHERE key='stepup_portal_required'");
       assert.equal(await getSetting('stepup_portal_required'), 'false');
-      await assert.rejects(proof(await request('profile', false, '')), denied('step_up_required'));
+      await assert.rejects(proof(await request('profile', false, '')), denied('session_context_mismatch'));
       await database.query("UPDATE sessions SET stepup_at=now()-interval '45 minutes' WHERE sid=$1", [sid]);
       await database.query("UPDATE settings SET value='60' WHERE key='stepup_validity_minutes'");await proof(await request());
       await database.query("UPDATE settings SET value='30' WHERE key='stepup_validity_minutes'");await assert.rejects(proof(await request()), denied('step_up_required'));

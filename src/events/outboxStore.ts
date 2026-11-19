@@ -78,7 +78,7 @@ export interface PendingRow extends WireEvent { attempts: number; due: boolean }
 export interface DestinationClaim {
   clientId: string; token: string; uri: string | null; disabled: boolean; failures: number; events: PendingRow[];
 }
-export type Settlement = { kind: 'delivered' } | { kind: 'retry'; code: string; delayMs: number } | { kind: 'dead'; code: string };
+export type Settlement = { kind: 'delivered' } | { kind: 'retry'; code: string; delayMs: number } | { kind: 'dead'; code: string } | { kind: 'paused' };
 export interface DeliveryStore {
   destinations(limit: number): Promise<string[]>;
   claim(clientId: string): Promise<DestinationClaim | null>;
@@ -91,8 +91,9 @@ export class PostgresOutboxStore implements DeliveryStore {
 
   async destinations(limit = 32): Promise<string[]> {
     const { rows } = await this.database.query(
-      `SELECT d.client_id FROM event_destinations d
+      `SELECT d.client_id FROM event_destinations d JOIN oauth_clients c USING(client_id)
        WHERE d.next_attempt_at<=now() AND (d.lease_until IS NULL OR d.lease_until<=clock_timestamp())
+         AND c.disabled_at IS NULL AND NULLIF(btrim(c.events_uri),'') IS NOT NULL
          AND EXISTS (SELECT 1 FROM event_outbox e WHERE e.target_client_id=d.client_id AND e.status='pending')
        ORDER BY d.next_attempt_at,d.client_id LIMIT $1`, [Math.min(Math.max(limit, 1), 64)]);
     return rows.map(r => r.client_id as string);
@@ -156,7 +157,7 @@ export class PostgresOutboxStore implements DeliveryStore {
         await db.query(
           `UPDATE event_outbox SET status='dead',last_error_code=$3
            WHERE target_client_id=$1 AND id=ANY($2::uuid[]) AND status='pending'`, [claim.clientId, [...ids], outcome.code]);
-      } else {
+      } else if (outcome.kind === 'retry') {
         await db.query(
           `UPDATE event_outbox SET attempts=attempts+1,
              status=CASE WHEN attempts+1 >= $3 THEN 'dead' ELSE 'pending' END,
@@ -164,6 +165,8 @@ export class PostgresOutboxStore implements DeliveryStore {
            WHERE target_client_id=$1 AND id=ANY($2::uuid[]) AND status='pending'`,
           [claim.clientId, [...ids], MAX_ATTEMPTS, outcome.delayMs, outcome.code]);
       }
+      const code = outcome.kind === 'delivered' ? 'delivered' : outcome.kind === 'paused' ? 'paused' : outcome.code;
+      await db.query('UPDATE event_destinations SET last_outcome_code=$2,last_outcome_at=clock_timestamp() WHERE client_id=$1', [claim.clientId, code]);
       await this.release(db, claim.clientId, claim.token, outcome.kind === 'retry' ? Math.min(claim.failures + 1, MAX_ATTEMPTS) : 0);
       await db.query('COMMIT');
       return true;
@@ -208,16 +211,18 @@ export function boundedBatch(rows: readonly PendingRow[]): WireEvent[] {
 export async function deliverDestination(deps: DeliveryDependencies, clientId: string): Promise<boolean> {
   const claim = await deps.store.claim(clientId);
   if (!claim) return false;
+  // Administrative pauses and incomplete routing retain intent without consuming
+  // a delivery attempt. Re-enabling/configuring the client wakes the destination.
+  if (!claim.uri?.trim() || claim.disabled) {
+    await deps.store.settle(claim, claim.events.map(event => event.id), { kind: 'paused' });
+    return false;
+  }
   const batch = boundedBatch(claim.events);
   if (!batch.length) {
     if (claim.events[0]?.due) await deps.store.settle(claim, [claim.events[0].id], { kind: 'dead', code: 'event_too_large' });
     return false;
   }
   const ids = batch.map(e => e.id);
-  if (!claim.uri || claim.disabled) {
-    await deps.store.settle(claim, ids, { kind: 'dead', code: 'destination_unavailable' });
-    return false;
-  }
   let token: string;
   try { token = await deps.sign(clientId, batch); }
   catch {

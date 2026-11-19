@@ -344,9 +344,21 @@ CREATE TABLE event_destinations (
     lease_until timestamptz,
     next_attempt_at timestamptz NOT NULL DEFAULT now(),
     failures integer NOT NULL DEFAULT 0 CHECK(failures>=0),
+    last_outcome_code text,
+    last_outcome_at timestamptz,
+    last_recovered_at timestamptz,
     CHECK ((lease_token IS NULL) = (lease_until IS NULL))
 );
 CREATE INDEX idx_outbox_due ON event_outbox (next_attempt_at) WHERE status = 'pending';
+CREATE INDEX event_outbox_client_status ON event_outbox(target_client_id,status);
+CREATE TABLE event_recoveries (
+    client_id text NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+    request_id uuid NOT NULL,
+    requested_by uuid NOT NULL,
+    result jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(client_id,request_id)
+);
 
 -- Mirror of each RP's role catalog (pushed via roles.sync, full-state).
 CREATE TABLE app_roles (

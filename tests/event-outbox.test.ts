@@ -131,11 +131,12 @@ test('immediate draining stops at the first rejection or lease loss, without ano
   }
 });
 
-test('missing endpoint and oversized oldest row dead-letter without bypassing or HTTP', async () => {
+test('missing endpoint pauses; a ready oversized oldest row dead-letters without bypassing or HTTP', async () => {
   const store = new FakeStore();let signs = 0;
   const deps = { store, async sign() { signs++;return 'signed'; }, async send() { throw new Error('unexpected HTTP'); } };
   store.current.uri = null;await deliverDestination(deps, 'rp');
-  assert.deepEqual(store.settled[0].outcome, { kind: 'dead', code: 'destination_unavailable' });
+  assert.deepEqual(store.settled[0].outcome, { kind: 'paused' });
+  store.current.uri = 'https://rp.example.invalid/events';
   store.current.events = [row(ID, { text: 'x'.repeat(EVENT_BYTES_MAX) }), row(ID2)];
   await deliverDestination(deps, 'rp');
   assert.deepEqual(store.settled[1], { ids: [ID], outcome: { kind: 'dead', code: 'event_too_large' } });

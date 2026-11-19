@@ -1,3 +1,4 @@
+import { currentSessionContextError } from '../oidc/currentSession.js';
 import type pg from 'pg';
 import { verifyAccessToken, accountResourceError, type AuthedRequest } from '../resourceAuth.js';
 import { config } from '../config.js';
@@ -15,7 +16,10 @@ export async function assertOrgRoleProof(db: pg.PoolClient, req: AuthedRequest):
   const { rows } = await db.query<{ key: string; value: string }>(
     'SELECT key,value FROM settings WHERE key=ANY($1::text[])', [['stepup_portal_required', 'stepup_validity_minutes']]);
   const settings = new Map(rows.map(row => [row.key, row.value]));
-  if (settings.get('stepup_portal_required') !== 'true') return;
+  const required = settings.get('stepup_portal_required') === 'true';
+  const contextError = currentSessionContextError(current, req.headers['x-stepup-sid'], required);
+  if (contextError) throw new RoleAccessError(403, { error: contextError });
+  if (!required) return;
   const sid = typeof req.headers['x-stepup-sid'] === 'string' ? req.headers['x-stepup-sid'] : '';
   if (!sid) throw new RoleAccessError(403, { error: 'step_up_required' });
   const { rows: [session] } = await db.query<{ user_sub: string; stepup_at: string | null; stepup_method: string | null }>(

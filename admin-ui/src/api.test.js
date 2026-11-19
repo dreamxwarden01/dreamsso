@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getMe, listClients, createClient, updateClient, apiErrorMessage, beforeAuthBounce } from './api.js';
+import { getMe, listClients, createClient, updateClient, apiErrorMessage, beforeAuthBounce, getClientDelivery, recoverClientDelivery } from './api.js';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -143,4 +143,31 @@ test('RP recovery listeners run synchronously before auth navigation and failure
 test('me requires stable authenticated subject before RP restoration is possible', async (t) => {
   fixture(t, async () => json({ csrf: 'synthetic' }));
   await assert.rejects(getMe(), (e) => e.code === 'invalid_response');
+});
+
+const delivery = () => ({ state: 'ready', counts: { pending: 1, paused: 0, dead: 0, delivered: 4 }, last_outcome: null, can_recover: true });
+const recovery = () => ({ logout_requeued: 1, role_snapshots: 2, role_superseded: 3, other_retained: 0 });
+test('delivery APIs use encoded client paths, CSRF and the supplied idempotency key; responses expose aggregates only', async (t) => {
+  const calls = [];
+  fixture(t, async (url, opts) => {
+    calls.push({ url, opts });
+    if (url.endsWith('/me')) return json({ csrf: 'fixture-csrf', sub: 'actor' });
+    return json({ delivery: { ...delivery(), payload: 'must not pass through' }, recovery: recovery(), subjects: ['private'] });
+  });
+  await getMe();
+  assert.deepEqual(await getClientDelivery('app/one'), { delivery: delivery() });
+  assert.equal(calls[1].url, '/admin/api/clients/app%2Fone/delivery');
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  assert.deepEqual(await recoverClientDelivery('app/one', requestId), { delivery: delivery(), recovery: recovery() });
+  assert.equal(calls[2].url, '/admin/api/clients/app%2Fone/delivery/recover');
+  assert.equal(calls[2].opts.headers['x-csrf-token'], 'fixture-csrf');
+  assert.deepEqual(JSON.parse(calls[2].opts.body), { request_id: requestId });
+});
+test('malformed delivery reads fail visibly; malformed recovery success is uncertain and never automatically retried', async (t) => {
+  let calls = 0;
+  fixture(t, async () => { calls++; return json({ delivery: delivery(), recovery: { ...recovery(), other_retained: '0' } }); });
+  await assert.rejects(recoverClientDelivery('app', 'fixture'), (e) => e.code === 'invalid_response' && e.uncertain);
+  assert.equal(calls, 1);
+  t.mock.method(globalThis, 'fetch', async () => json({ delivery: { ...delivery(), counts: {} } }));
+  await assert.rejects(getClientDelivery('app'), (e) => e.code === 'invalid_response' && !e.uncertain);
 });

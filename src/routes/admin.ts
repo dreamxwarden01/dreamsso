@@ -23,7 +23,9 @@ import {
   normalizeHostname, normalizePath, normalizeSlug, normalizeName, composeUrl, decomposeUrl,
 } from '../clientNormalize.js';
 import { getSetting, setSetting, setSecretSetting, hasSetting } from '../settings.js';
-import { enqueueEvents } from '../events.js';
+import { enqueueEvents, kickDrain } from '../events.js';
+import { withRoleTransaction } from '../rbac/roleChanges.js';
+import { readClientDelivery, recoverClientDelivery, setClientEnabled, reconcileChangedEndpoint, ClientDeliveryError } from '../events/clientDelivery.js';
 import { sendEmail } from '../email.js';
 import { renderTestEmail } from '../emailTemplates.js';
 
@@ -414,17 +416,21 @@ adminRouter.patch('/admin/api/clients/:id', requireCsrf, async (req: AdminReques
     value.jwks = fetched.jwks!;
   }
 
-  await pool.query(
-    `UPDATE oauth_clients SET
-       name = $2, is_first_party = $3, entry_policy = $4, redirect_uris = $5,
-       events_uri = $6, jwks_uri = $7, jwks = $8, allowed_scopes = $9
-     WHERE client_id = $1`,
-    [req.params.id, value.name, value.is_first_party, value.entry_policy,
-     value.redirect_paths.map((p) => composeUrl(value.hostname, p)),
-     value.events_path ? composeUrl(value.hostname, value.events_path) : null,
-     value.jwks_uri, value.jwks, value.allowed_scopes],
-  );
-  res.status(204).end();
+  try {
+    await withRoleTransaction(async db => {
+      const id = String(req.params.id);
+      const { rows: [previous] } = await db.query('SELECT events_uri FROM oauth_clients WHERE client_id=$1 FOR NO KEY UPDATE', [id]);
+      if (!previous) throw new ClientDeliveryError(404, 'not_found');
+      const endpoint = value.events_path ? composeUrl(value.hostname, value.events_path) : null;
+      await db.query(`UPDATE oauth_clients SET name=$2,is_first_party=$3,entry_policy=$4,redirect_uris=$5,
+        events_uri=$6,jwks_uri=$7,jwks=$8,allowed_scopes=$9 WHERE client_id=$1`,
+        [id, value.name, value.is_first_party, value.entry_policy,
+          value.redirect_paths.map(path => composeUrl(value.hostname, path)), endpoint,
+          value.jwks_uri, value.jwks, value.allowed_scopes]);
+      if (previous.events_uri !== endpoint) await reconcileChangedEndpoint(db, id);
+    });
+    kickDrain();res.status(204).end();
+  } catch (error) { deliveryFailure(res, error); }
 });
 
 // POST /admin/api/clients/:id/request-role-sync — the manual refresh: ask the
@@ -461,27 +467,41 @@ adminRouter.get('/admin/api/clients/:id/role-catalog', async (req: AdminRequest,
   });
 });
 
-adminRouter.post('/admin/api/clients/:id/disable', requireCsrf, async (req: AdminRequest, res: Response) => {
-  // System clients (the account portal) are part of the SSO itself — disabling
-  // one would lock everyone out of their own account management.
-  const { rowCount } = await pool.query(
-    'UPDATE oauth_clients SET disabled_at = now() WHERE client_id = $1 AND disabled_at IS NULL AND NOT is_system',
-    [req.params.id],
-  );
-  if (!rowCount) {
-    const { rows } = await pool.query('SELECT is_system FROM oauth_clients WHERE client_id = $1', [req.params.id]);
-    return res.status(rows[0]?.is_system ? 409 : 404).json({ error: rows[0]?.is_system ? 'system_client' : 'not_found' });
-  }
-  res.status(204).end();
+function deliveryFailure(res: Response, error: unknown) {
+  if (!(error instanceof ClientDeliveryError)) console.error('admin_delivery_unavailable');
+  return error instanceof ClientDeliveryError
+    ? res.status(error.status).json({ error: error.code })
+    : res.status(503).json({ error: 'delivery_unavailable' });
+}
+
+adminRouter.get('/admin/api/clients/:id/delivery', async (req: AdminRequest, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try { res.json({ delivery: await readClientDelivery(pool, String(req.params.id)) }); }
+  catch (error) { deliveryFailure(res, error); }
 });
 
-adminRouter.post('/admin/api/clients/:id/enable', requireCsrf, async (req: AdminRequest, res: Response) => {
-  const { rowCount } = await pool.query(
-    'UPDATE oauth_clients SET disabled_at = NULL WHERE client_id = $1 AND disabled_at IS NOT NULL',
-    [req.params.id],
-  );
-  if (!rowCount) return res.status(404).json({ error: 'not_found' });
-  res.status(204).end();
+adminRouter.post('/admin/api/clients/:id/delivery/recover', requireCsrf, async (req: AdminRequest, res) => {
+  const id = String(req.params.id);
+  const requestId = typeof req.body?.request_id === 'string' ? req.body.request_id : '';
+  try {
+    const recovery = await withRoleTransaction(db => recoverClientDelivery(db, id, req.adminSession!.userSub, requestId));
+    kickDrain();
+    res.json({ recovery, delivery: await readClientDelivery(pool, id) });
+  } catch (error) { deliveryFailure(res, error); }
+});
+
+adminRouter.post('/admin/api/clients/:id/disable', requireCsrf, async (req: AdminRequest, res) => {
+  try {
+    await withRoleTransaction(db => setClientEnabled(db, String(req.params.id), false));
+    res.status(204).end();
+  } catch (error) { deliveryFailure(res, error); }
+});
+
+adminRouter.post('/admin/api/clients/:id/enable', requireCsrf, async (req: AdminRequest, res) => {
+  try {
+    await withRoleTransaction(db => setClientEnabled(db, String(req.params.id), true));
+    kickDrain();res.status(204).end();
+  } catch (error) { deliveryFailure(res, error); }
 });
 
 // Permanent delete — only from the disabled state (the UI shows a strong warning).

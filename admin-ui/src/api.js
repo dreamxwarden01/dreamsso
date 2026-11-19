@@ -1,4 +1,5 @@
 // Admin API errors retain machine codes; views decide how to present them.
+import { deliverySummary, recoverySummary } from './clientDelivery.js';
 let csrf = null;
 const authBounceListeners = new Set();
 export function beforeAuthBounce(listener) {
@@ -30,6 +31,9 @@ export function apiErrorMessage(e) {
     csrf_failed: 'The page security token has expired. Reload this page before trying again.',
     unauthenticated: 'Your session has expired. Returning to sign in…',
     step_up_required: 'Identity verification is required. Returning to verification…',
+    client_disabled: 'Enable this application before resynchronizing access.',
+    no_events_endpoint: 'Save a notification endpoint before resynchronizing access.',
+    role_catalog_unavailable: 'The current access catalog is unavailable. Restore it before resynchronizing access.',
   };
   let message = Object.hasOwn(messages, e?.code) ? messages[e.code] : null;
   if (!message && e?.status === 403) message = 'The server denied this action. Check your access or reload this page.';
@@ -141,6 +145,13 @@ export const updateClient = (id, body) =>
 export const disableClient = (id) => req(`/clients/${encodeURIComponent(id)}/disable`, { method: 'POST' });
 export const enableClient = (id) => req(`/clients/${encodeURIComponent(id)}/enable`, { method: 'POST' });
 export const deleteClient = (id) => req('/clients/' + encodeURIComponent(id), { method: 'DELETE' });
+export const getClientDelivery = (id) => req(`/clients/${encodeURIComponent(id)}/delivery`, {
+  timeoutMs: 15_000, expectedStatus: 200, validate: (d) => Boolean(deliverySummary(d.delivery)),
+}).then((d) => ({ delivery: deliverySummary(d.delivery) }));
+export const recoverClientDelivery = (id, requestId) => req(`/clients/${encodeURIComponent(id)}/delivery/recover`, {
+  method: 'POST', body: JSON.stringify({ request_id: requestId }), timeoutMs: 15_000, expectedStatus: 200,
+  validate: (d) => Boolean(deliverySummary(d.delivery) && recoverySummary(d.recovery)),
+}).then((d) => ({ delivery: deliverySummary(d.delivery), recovery: recoverySummary(d.recovery) }));
 export const getKeys = () => req('/keys');
 export const rotateKeys = () => req('/keys/rotate', { method: 'POST' });
 export const getMtls = () => req('/mtls');

@@ -1,3 +1,4 @@
+import { requireCurrentSessionContext } from '../oidc/currentSession.js';
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { config } from '../config.js';
@@ -9,8 +10,8 @@ import { parseDevice } from '../deviceName.js';
 
 // The Devices pane's resource API — lists the caller's live SSO master sessions
 // (one per browser) and terminates them. Access-token protected; the BFF proxies
-// these and marks the current session (the SSO can't know the caller's own sid,
-// since the access token carries no `sid` claim — that's the BFF's job).
+// these and marks the current session for its UI. Current-session operations
+// bind their context to the verified bearer SID; target deletion remains separate.
 export const devicesRouter = Router();
 const scoped = requireScope('profile');
 
@@ -91,7 +92,8 @@ devicesRouter.delete('/account/sessions/:sid', scoped, requirePerm('profile.secu
 
 // POST /account/sessions/terminate-others { keep_sid } — sign out everywhere except
 // one session (the caller's current one, supplied by the BFF as session.ssoSid).
-devicesRouter.post('/account/sessions/terminate-others', scoped, requirePerm('profile.security.sessions.terminate'), async (req: AuthedRequest, res) => {
+devicesRouter.post('/account/sessions/terminate-others', scoped, requirePerm('profile.security.sessions.terminate'),
+  requireCurrentSessionContext(req => (req.body ?? {}).keep_sid), async (req: AuthedRequest, res) => {
   const sub = req.auth!.sub;
   const keep = String((req.body ?? {}).keep_sid ?? '');
   if (!UUID_RE.test(keep)) return res.status(400).json({ error: 'invalid_keep_sid' });

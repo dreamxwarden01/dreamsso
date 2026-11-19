@@ -1,3 +1,4 @@
+import { currentSessionContextError } from '../oidc/currentSession.js';
 import { Router, type Response, type NextFunction } from 'express';
 import argon2 from 'argon2';
 import { pool } from '../db.js';
@@ -70,6 +71,8 @@ export const FACTOR_STEPUP_MAX_S = 600; // 10 min
 function requireSecurityStepup(maxAgeSeconds?: number) {
   return async (req: AuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const sub = req.auth!.sub;
+    const contextError = currentSessionContextError(req.auth, req.headers['x-stepup-sid']);
+    if (contextError) { res.status(403).json({ error: contextError });return; }
     const sid = typeof req.headers['x-stepup-sid'] === 'string' ? req.headers['x-stepup-sid'] : '';
     if (/^[0-9a-f-]{36}$/.test(sid)) {
       const { rows: [s] } = await pool.query<{ user_sub: string; stepup_at: string | null; stepup_method: string | null }>(
@@ -152,9 +155,9 @@ securityRouter.post('/account/password', scoped, requirePerm('profile.security.p
   const hash = await argon2.hash(new_password, { type: argon2.argon2id });
 
   // A changed password signs out every OTHER session (stated on the page).
-  // The caller's own master sid rides in from the BFF; without a valid one,
-  // deny-safe: revoke everything.
-  const currentSid = typeof req.headers['x-stepup-sid'] === 'string' ? req.headers['x-stepup-sid'] : '';
+  // The context gate above binds the BFF header to this verified bearer SID;
+  // retain only that session, with revoke-all as a defensive invalid-state fallback.
+  const currentSid = req.auth!.sid!;
   const keep = /^[0-9a-f-]{36}$/.test(currentSid);
   await withSessionRevocation(async db => {
     await db.query('UPDATE identities SET password_hash=$2,password_changed_at=now() WHERE sub=$1', [sub, hash]);

@@ -1,3 +1,4 @@
+import { currentSessionContextError } from '../oidc/currentSession.js';
 import type pg from 'pg';
 import { Router, type Response, type NextFunction } from 'express';
 import crypto from 'node:crypto';
@@ -49,20 +50,23 @@ const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
 // master-session sid in x-stepup-sid; it must belong to the token's subject and
 // carry a fresh stamp. On failure it returns 403 step_up_required, which the
 // portal decodes to (re)open the step-up modal.
-async function freshOrgStepup(req: AuthedRequest): Promise<boolean> {
-  if ((await getSetting('stepup_portal_required', 'false')) !== 'true') return true;
+async function orgStepupError(req: AuthedRequest): Promise<string | null> {
+  const required = (await getSetting('stepup_portal_required', 'false')) === 'true';
+  const contextError = currentSessionContextError(req.auth, req.headers['x-stepup-sid'], required);
+  if (contextError) return contextError;
+  if (!required) return null;
   const sid = qstr(req.headers['x-stepup-sid']);
-  if (!sid) return false;
   const { rows: [session] } = await pool.query<{ user_sub: string; stepup_at: string | null; stepup_method: string | null }>(
     'SELECT user_sub, EXTRACT(EPOCH FROM stepup_at)::text AS stepup_at, stepup_method FROM sessions WHERE sid = $1', [sid]);
-  if (!session || session.user_sub !== req.auth!.sub) return false;
+  if (!session || session.user_sub !== req.auth!.sub) return 'step_up_required';
   const fresh = await isStepupFresh(session.stepup_at ? Number(session.stepup_at) : null);
   const { accepted } = await acceptedStepupMethods(req.auth!.sub, 'strong-mandatory');
-  return stepupSatisfies(accepted, session.stepup_method, fresh);
+  return stepupSatisfies(accepted, session.stepup_method, fresh) ? null : 'step_up_required';
 }
 async function requireFreshStepup(req: AuthedRequest, res: Response, next: NextFunction): Promise<void> {
-  if (await freshOrgStepup(req)) return next();
-  res.status(403).json({ error: 'step_up_required' });
+  const error = await orgStepupError(req);
+  if (!error) return next();
+  res.status(403).json({ error });
 }
 
 async function roleMutation<T>(req: AuthedRequest, res: Response, work: (db: pg.PoolClient) => Promise<T>,

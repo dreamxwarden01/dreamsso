@@ -1,3 +1,4 @@
+import { requireCurrentSessionContext } from '../oidc/currentSession.js';
 import { Router, type Response } from 'express';
 import argon2 from 'argon2';
 import { pool } from '../db.js';
@@ -21,6 +22,8 @@ import { renderOtpEmail } from '../emailTemplates.js';
 // email/password). So verify is method-generic; the accepted set is the gate's job.
 export const stepupRouter = Router();
 const scoped = requireScope('profile');
+const currentQuery = requireCurrentSessionContext(req => req.query.sid);
+const currentBody = requireCurrentSessionContext(req => (req.body ?? {}).sid);
 
 const PK_KEY = (sid: string) => `stepup:pk:${sid}`;
 // Failure limiter keyed by USER (not sid — else a fresh login would reset it):
@@ -37,8 +40,8 @@ const siteName = async () => (await getSetting('site_name', 'DreamSSO'))!;
 const modeOf = (q: unknown): StepupMode =>
   q === 'fallback' ? 'fallback' : q === 'email-change' ? 'email-change' : 'strong-mandatory';
 
-// The sid comes from the BFF, not the access token — verify it's a live session
-// belonging to the token's subject before doing anything with it.
+// The request SID is first bound to the verified bearer SID by middleware.
+// Retain the row/subject check before inspecting or stamping that session.
 async function ownSession(req: AuthedRequest, sid: string) {
   if (!/^[0-9a-f-]{36}$/i.test(sid)) return null;
   const { rows: [row] } = await pool.query<{ user_sub: string; stepup_at: Date | null; stepup_method: string | null }>(
@@ -53,7 +56,7 @@ async function ownSession(req: AuthedRequest, sid: string) {
 // fallback (personal security). `verified` = fresh AND the recorded method is in
 // the mode's accepted set, so a below-bar login (e.g. password-only) reports
 // unverified and the client challenges for the right tier.
-stepupRouter.get('/account/stepup/status', scoped, async (req: AuthedRequest, res: Response) => {
+stepupRouter.get('/account/stepup/status', scoped, currentQuery, async (req: AuthedRequest, res: Response) => {
   const sid = String(req.query.sid ?? '');
   const session = await ownSession(req, sid);
   if (!session) return res.status(404).json({ error: 'not_found' });
@@ -83,7 +86,7 @@ stepupRouter.get('/account/stepup/status', scoped, async (req: AuthedRequest, re
 
 // POST /account/stepup/passkey-options { sid } — assertion options; the challenge
 // lives in Redis keyed by sid (reused across sheet-reopens, consumed per attempt).
-stepupRouter.post('/account/stepup/passkey-options', scoped, async (req: AuthedRequest, res: Response) => {
+stepupRouter.post('/account/stepup/passkey-options', scoped, currentBody, async (req: AuthedRequest, res: Response) => {
   const sid = String((req.body ?? {}).sid ?? '');
   if (!(await ownSession(req, sid))) return res.status(404).json({ error: 'not_found' });
   if ((await countPasskeys(req.auth!.sub)) === 0) return res.status(422).json({ error: 'no_passkeys' });
@@ -94,7 +97,7 @@ stepupRouter.post('/account/stepup/passkey-options', scoped, async (req: AuthedR
 
 // POST /account/stepup/send-email { sid } — issue + mail a step-up OTP (the email
 // fallback tier). Only for a VERIFIED address; cooldown/daily caps live in emailOtp.
-stepupRouter.post('/account/stepup/send-email', scoped, async (req: AuthedRequest, res: Response) => {
+stepupRouter.post('/account/stepup/send-email', scoped, currentBody, async (req: AuthedRequest, res: Response) => {
   const sid = String((req.body ?? {}).sid ?? '');
   if (!(await ownSession(req, sid))) return res.status(404).json({ error: 'not_found' });
   const { rows: [id] } = await pool.query<{ email: string | null; email_verified: boolean }>(
@@ -121,7 +124,7 @@ stepupRouter.post('/account/stepup/send-email', scoped, async (req: AuthedReques
 // actually prove (totp/passkey need the enrolled factor; email needs a verified
 // address + issued code; password checks the hash), and the scenario gate decides
 // whether that method suffices — so stamping a below-bar method never bypasses.
-stepupRouter.post('/account/stepup/verify', scoped, async (req: AuthedRequest, res: Response) => {
+stepupRouter.post('/account/stepup/verify', scoped, currentBody, async (req: AuthedRequest, res: Response) => {
   const b = (req.body ?? {}) as {
     sid?: unknown; method?: unknown; code?: unknown; credential?: unknown; password?: unknown;
   };

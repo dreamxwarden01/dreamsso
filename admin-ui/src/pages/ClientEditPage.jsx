@@ -8,6 +8,7 @@ import { writeClientDraft, readClientDraft, restoreClientDraft, clearClientDraft
 import { ClientErrorContext, ErrorInput, ErrorGroup, OutcomePanel, SaveButton, useSaveFeedback, useScrollReserve } from '../SaveFeedback.jsx';
 import { feedbackTechnical, keyFieldFeedback } from '../saveFeedback.js';
 import { SkelInput, Ph } from '../Skel.jsx';
+import ClientDelivery from '../ClientDelivery.jsx';
 import { normalizeClientErrors, activeClientErrors, hasBlockingClientErrors, clientErrorsForDisplay,
   clearEditedServerErrors, changedClientFields, missingClientFields, removeRedirectErrors, clientErrorLabel } from '../clientFormErrors.js';
 // The SHARED normalization module — the same file the admin API runs server-side.
@@ -145,6 +146,7 @@ function ClientEditForm({ id, subject }) {
   const [errs, setErrs] = useState({});
   const [serverErrs, setServerErrs] = useState({});
   const [busy, setBusy] = useState(false); // lifecycle actions only
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
   const feedback = useSaveFeedback();
   const scrollReserve = useScrollReserve();
   const [outcomeErrors, setOutcomeErrors] = useState({});
@@ -153,7 +155,7 @@ function ClientEditForm({ id, subject }) {
   const [outcomeKind, setOutcomeKind] = useState('save');
   const [alertMessage, setAlertMessage] = useState('');
   const saveLocked = feedback.state === 'pending' || feedback.state === 'success';
-  const formLocked = busy || saveLocked;
+  const formLocked = busy || saveLocked || deliveryBusy;
   const [loadErr, setLoadErr] = useState(null);
   const [saveErr, setSaveErr] = useState(null);
   const [saveUncertain, setSaveUncertain] = useState(false);
@@ -341,7 +343,7 @@ function ClientEditForm({ id, subject }) {
   const missing = missingClientFields(f, { isNew, externalJwksUri, hasInlineJwks: row?.has_inline_jwks });
   const requiredOk = Boolean(f) && missing.length === 0;
   const dirty = f && surface(f) !== snap;
-  const canSave = !busy && feedback.state === 'idle' && !hasErrors && requiredOk && draftOmitted.length === 0 && !draftSettled && (isNew || dirty);
+  const canSave = !busy && !deliveryBusy && feedback.state === 'idle' && !hasErrors && requiredOk && draftOmitted.length === 0 && !draftSettled && (isNew || dirty);
   const panelErrors = { ...outcomeErrors, ...activeClientErrors(errs, f?.key_mode) };
   const errorItems = Object.entries(panelErrors).filter(([, message]) => message);
   const errorMarks = Object.fromEntries(errorItems.flatMap(([key, message], index) =>
@@ -486,7 +488,7 @@ function ClientEditForm({ id, subject }) {
   };
 
   const lifecycle = async (action) => {
-    if (busy || feedback.state !== 'idle') return;
+    if (busy || deliveryBusy || feedback.state !== 'idle') return;
     const operation = beginMutation();
     setOutcomeKind('action');
     setBusy(true);
@@ -857,6 +859,9 @@ function ClientEditForm({ id, subject }) {
 
       </ClientErrorContext.Provider>
 
+      {!isNew && row && <ClientDelivery client={row} owner={subject} dirty={Boolean(dirty)}
+        locked={formLocked || Boolean(dirty) || Boolean(modal) || feedback.state !== 'idle'} onBusyChange={setDeliveryBusy} />}
+
       {!isNew && row?.is_system && (
         <div className="card pad">
           <p style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -876,18 +881,18 @@ function ClientEditForm({ id, subject }) {
             </p>
             <span style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
               {row?.disabled_at ? (
-                <button className="btn" onClick={() => setModal('enable')} disabled={busy || feedback.state !== 'idle'}>
+                <button className="btn" onClick={() => setModal('enable')} disabled={busy || deliveryBusy || feedback.state !== 'idle'}>
                   Enable
                 </button>
               ) : (
-                <button className="btn btn-danger" onClick={() => setModal('disable')} disabled={busy || feedback.state !== 'idle'}>
+                <button className="btn btn-danger" onClick={() => setModal('disable')} disabled={busy || deliveryBusy || feedback.state !== 'idle'}>
                   Disable
                 </button>
               )}
               <button
                 className="btn btn-danger"
                 onClick={() => { setDeleteConfirm(''); setModal('delete'); }}
-                disabled={busy || feedback.state !== 'idle' || !row?.disabled_at}
+                disabled={busy || deliveryBusy || feedback.state !== 'idle' || !row?.disabled_at}
                 title={row?.disabled_at ? undefined : 'Disable first'}
               >
                 Delete…

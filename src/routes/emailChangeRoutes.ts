@@ -1,3 +1,4 @@
+import { currentSessionContextError } from '../oidc/currentSession.js';
 import { Router, type Response } from 'express';
 import { pool } from '../db.js';
 import { config } from '../config.js';
@@ -54,6 +55,8 @@ async function loadIdentity(sub: string): Promise<IdentityRow | null> {
 // as factor management.
 const STEPUP_MAX_S = 600;
 async function requireFreshStepup(id: IdentityRow, req: AuthedRequest, res: Response): Promise<boolean> {
+  const contextError = currentSessionContextError(req.auth, req.headers['x-stepup-sid']);
+  if (contextError) { res.status(403).json({ error: contextError });return false; }
   const sid = qstr(req.headers['x-stepup-sid']);
   if (sid) {
     const { rows: [s] } = await pool.query<{ user_sub: string; stepup_at: string | null; stepup_method: string | null }>(

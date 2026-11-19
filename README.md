@@ -79,6 +79,17 @@ event ID and payload while refreshing the signed envelope.
 Receivers acknowledge processed or duplicate batches with exactly `204 No Content`.
 Other responses, including `200` HTML from an intermediary, remain retryable failures.
 
+Disabling a client or removing its events endpoint pauses delivery without consuming
+retry attempts. Re-enabling a configured client, changing its endpoint, or selecting
+**Resync access** in its admin page retries valid sign-outs and publishes current
+access state. Previously exhausted sign-outs receive three retry attempts per recovery,
+limiting how long a rejected notification can delay newer access updates.
+Older role notifications are superseded rather than replayed. Unknown
+failed notifications remain visible for investigation. The delivery card shows
+queued, paused, failed and delivered counts; a successful resync means work was queued,
+not that the receiving application has applied it. An uncertain response can be retried
+with the same recovery request ID.
+
 `account.roles_change` carries `sub`, `role_id`, `authority_epoch`,
 `authority_revision` and the current `account_status`. Status changes advance the
 same authority revision even when the role stays unchanged. The revision is a decimal string; receivers track it per
@@ -102,6 +113,11 @@ Session deletion and its logout outbox entries commit together. Receivers acknow
 logout only after effects complete and retain terminal SSO-session markers, so a late
 callback cannot reopen a revoked session. Normal local-session replacement remains
 separate. These revocation records belong with the application's session state in backups.
+
+Current-session step-up and retention parameters must match the authenticated
+access token's SSO session ID. A different session owned by the same account cannot
+supply its proof or be substituted as the current session. Explicitly targeted session
+administration remains separate from this check.
 
 Client assertions include `iss = sub = client_id`, integral `iat` and `exp` within a
 120-second lifetime, a fresh `jti`, and signed `method` / `path` claims matching the

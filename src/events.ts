@@ -115,6 +115,8 @@ async function cleanupArchive(): Promise<void> {
     SELECT id FROM event_outbox WHERE status='delivered' AND delivered_at<now()-interval '30 days' LIMIT 1000)`);
   await pool.query(`DELETE FROM processed_events WHERE (source,id) IN (
     SELECT source,id FROM processed_events WHERE processed_at<now()-interval '7 days' LIMIT 1000)`);
+  await pool.query(`DELETE FROM event_recoveries WHERE (client_id,request_id) IN (
+    SELECT client_id,request_id FROM event_recoveries WHERE created_at<now()-interval '7 days' LIMIT 1000)`);
 }
 
 export function startEventPump(): void {
