@@ -11,7 +11,6 @@ import { enforceTurnstileGate, s2sPost, mirror } from './reset.js';
 export const registerRouter = Router();
 
 const qstr = (v: unknown): string => (typeof v === 'string' ? v : '');
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_RE = /^[A-Z0-9]{12}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,20}$/;
 
@@ -44,13 +43,9 @@ registerRouter.post('/api/register/start', async (req: Request, res: Response) =
     const body = (req.body ?? {}) as Record<string, unknown>;
     const email = qstr(body.email).trim();
     const code = qstr(body.code).trim().toUpperCase().replace(/\s/g, '');
-    // Shape only — required-ness and liveness are the SSO's call (it knows the
-    // require_invitation_code toggle and checks the code BEFORE the email).
-    if (code && !CODE_RE.test(code)) return res.status(422).json({ errors: { code: 'invalid_code' } });
-    if (!EMAIL_RE.test(email) || email.length > 254) {
-      return res.status(422).json({ errors: { email: 'invalid_email' } });
-    }
-
+    // The SSO owns the invitation toggle and validation order. Forward the
+    // whitelisted values only after the human gate; do not reject an ignored
+    // code or check email ahead of an enabled invitation's liveness check.
     await mirror(res, await s2sPost('/internal/register/start', {
       email, code: code || undefined, request_id: qstr(body.request_id) || undefined,
     }));

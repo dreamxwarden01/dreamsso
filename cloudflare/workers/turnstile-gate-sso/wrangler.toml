@@ -1,5 +1,5 @@
 # turnstile-gate-sso — edge Turnstile verification for the DreamSSO account
-# portal's public flows (password reset now, registration later).
+# portal's password-reset and registration flows.
 #
 # DO NOT deploy against dev: the dev origins are local DNS records, not behind
 # Cloudflare, so worker routes can't attach. Prod-only. The origin is designed

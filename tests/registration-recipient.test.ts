@@ -119,30 +119,72 @@ function clientFixture(page: 'start' | 'complete' = 'start', options: Record<str
   return fixture;
 }
 
-test('shared preview is read-only, shows actual role/deadline and locks a prebound address', async () => {
-  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerInvitation: async () => ({ invitation: invitation({ bound_email: 'bound@example.test' }) }) } });
-  await h.flush(); assert.deepEqual(h.calls.map(call => call.name), ['registerInvitation']);
-  assert.match(h.text(), /Member/); assert.match(h.text(), /Complete by/);
-  assert.equal(h.field('recipient-email').props.value, 'bound@example.test'); assert.equal(h.field('recipient-email').props.readOnly, true);
+test('plain txn signup first screen contains email, required invitation code and human verification together', async () => {
+  const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key', ssoUrl: 'https://sso.example.test' } });
+  await h.flush(); assert.equal(h.calls.length, 0);
+  assert.equal(h.field('reg-email').props.readOnly, false); assert.equal(h.field('reg-code').props.value, '');
+  assert.equal(h.field('reg-code').props.required, true); assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
+  assert.doesNotMatch(h.text(), /Use your invitation|see the access it offers/);
+  assert.ok(h.nodes(node => node.type === 'a' && node.props.href === 'https://sso.example.test/login?txn=synthetic-login-txn').length);
+  h.unmount();
+});
+
+test('shared URL only prefills the code in that same form, with no initial invitation read', async () => {
+  const h = clientFixture('start', { query: 'code=abcd1234efgh&txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
+  await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.field('reg-code').props.value, 'ABCD1234EFGH');
+  assert.equal(h.field('reg-email').props.value, ''); assert.equal(h.field('reg-email').props.readOnly, false);
   assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); h.unmount();
 });
 
-test('manual code preview needs no human widget or email and never sends mail', async () => {
-  const h = clientFixture('start', { query: '', site: { turnstileSiteKey: 'synthetic-site-key' } });
-  await h.flush(); assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
-  await h.input('reg-code', 'abcd1234efgh'); await h.submit(); await h.flush();
-  assert.deepEqual(h.calls.map(call => call.name), ['registerInvitation']); assert.equal(h.calls[0].args[0], 'ABCD1234EFGH'); h.unmount();
+test('manual code is submitted with email and human proof directly, without any preflight', async () => {
+  const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test'); await h.input('reg-code', 'abcd1234efgh');
+  await h.submit(); assert.equal(h.calls.length, 0);
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit();
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']);
+  assert.equal(h.calls[0].args[0], 'alex@example.test'); assert.equal(h.calls[0].args[1], 'ABCD1234EFGH');
+  assert.equal(h.calls[0].args[2], 'synthetic-human-proof'); assert.ok(h.calls[0].args[3]); h.unmount();
 });
 
-for (const status of ['used', 'expired', 'revoked', 'unavailable']) test('recipient terminal state ' + status + ' never renders a mutable form or sends', async () => {
-  const h = clientFixture('start', { api: { registerInvitation: async () => ({ invitation: invitation({ status }) }) } });
-  await h.flush(); assert.equal(h.nodes(node => node.type === 'form').length, 0); assert.equal(h.calls.length, 1);
+for (const status of ['used', 'expired', 'revoked', 'unavailable']) test('send endpoint terminal state ' + status + ' is preserved after human-gated submission', async () => {
+  const h = clientFixture('start', { api: { registerStart: async () => { throw { status: 409, code: 'invitation_' + status, data: { invitation: invitation({ status }) } }; } } });
+  await h.flush(); assert.equal(h.calls.length, 0); await h.input('reg-email', 'alex@example.test'); await h.submit();
+  assert.equal(h.nodes(node => node.type === 'form').length, 0); assert.equal(h.calls.length, 1);
   assert.match(h.text(), status === 'used' ? /already been used/ : status === 'expired' ? /has expired/ : status === 'revoked' ? /was withdrawn/ : /no longer available/); h.unmount();
 });
 
+for (const code of ['', 'BADBADBADBAD']) test('required code is checked by the send endpoint after human verification: ' + (code || 'missing'), async () => {
+  const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' },
+    api: { registerStart: async () => { throw code ? { status: 422, code: 'invalid_invitation' } : { status: 422, data: { errors: { code: 'invalid_code' } } }; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test'); if (code) await h.input('reg-code', code);
+  await h.submit(); assert.equal(h.calls.length, 0);
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit();
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); assert.equal(h.calls[0].args[1], code || undefined);
+  assert.equal(h.calls[0].args[2], 'synthetic-human-proof'); await h.advance(2000);
+  assert.equal(h.field('reg-email').props.value, 'alex@example.test'); assert.equal(h.field('reg-code').props.readOnly, false);
+  assert.match(h.text(), code ? /invalid or cannot be used/ : /invitation code is required/); h.unmount();
+});
+
+test('a failed server human check does not trigger invitation lookup or consume the form fields', async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' },
+    api: { registerStart: async () => { throw { status: 403, code: 'turnstile_failed' }; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-expired-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); assert.equal(h.field('reg-email').props.value, 'alex@example.test');
+  assert.equal(h.field('reg-code').props.value, 'ABCD1234EFGH'); assert.equal(h.field('reg-code').props.readOnly, false); assert.match(h.text(), /Human verification failed/); h.unmount();
+});
+
+test('a human-gated binding mismatch can read and lock the authoritative invited address afterward', async () => {
+  const h = clientFixture('start', { api: { registerStart: async () => { throw { status: 403, code: 'email_mismatch' }; },
+    registerInvitation: async () => ({ invitation: invitation({ bound_email: 'bound@example.test' }) }) } });
+  await h.flush(); assert.equal(h.calls.length, 0); await h.input('reg-email', 'wrong@example.test'); await h.submit();
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart', 'registerInvitation']);
+  assert.equal(h.field('recipient-email').props.value, 'bound@example.test'); assert.equal(h.field('recipient-email').props.readOnly, true);
+  assert.match(h.text(), /recipient cannot be changed/); h.unmount();
+});
+
 test('queue acknowledgement is honest, send feedback holds two seconds, polling ends on provider acceptance', async () => {
-  let previews = 0;
-  const h = clientFixture('start', { api: { registerInvitation: async () => ({ invitation: invitation(++previews === 1 ? {} : {
+  const h = clientFixture('start', { api: { registerInvitation: async () => ({ invitation: invitation({
     bound_email: 'alex@example.test', mail: { state: 'sent', at: new Date(now).toISOString() },
   }) }) } });
   await h.flush(); await h.input('reg-email', 'alex@example.test'); await h.submit();
@@ -171,10 +213,13 @@ test('definite queued acknowledgement followed by explicit resend uses a new UUI
   const sends = h.calls.filter(call => call.name === 'registerStart'); assert.equal(sends.length, 2); assert.notEqual(sends[0].args[3], sends[1].args[3]); h.unmount();
 });
 
-test('free registration keeps its sync email contract and optional invitation entry', async () => {
-  const h = clientFixture('start', { query: '', site: { invitationRequired: false }, api: { registerStart: async () => ({ sent: true, resend_backoff: 60 }) } });
-  await h.flush(); assert.match(h.text(), /Use an invitation code/); await h.input('reg-email', 'alex@example.test'); await h.submit(); await h.advance(2000);
-  assert.match(h.text(), /Check your email/); assert.match(h.text(), /30 minutes/); assert.equal(h.calls[0].args[1], undefined); h.unmount();
+for (const query of ['txn=synthetic-login-txn', 'code=ABCD1234EFGH&txn=synthetic-login-txn']) test('invitation feature off ignores code and keeps email plus human verification: ' + query.split('&')[0], async () => {
+  const h = clientFixture('start', { query, site: { invitationRequired: false, turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => ({ sent: true, resend_backoff: 60 }) } });
+  await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.nodes(node => node.props.id === 'reg-code').length, 0);
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); assert.doesNotMatch(h.text(), /Use an invitation code/);
+  await h.input('reg-email', 'alex@example.test'); h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  assert.match(h.text(), /Check your email/); assert.match(h.text(), /30 minutes/); assert.equal(h.calls[0].args[1], undefined); assert.equal(h.calls[0].args[3], undefined);
+  assert.equal(h.calls.filter(call => call.name === 'registerInvitation').length, 0); h.unmount();
 });
 
 test('definite free-registration mail failure leaves its email editable', async () => {
@@ -185,7 +230,8 @@ test('definite free-registration mail failure leaves its email editable', async 
 
 test('queued status polling pauses after two minutes without an infinite busy button', async () => {
   const h = clientFixture('start', { api: { registerInvitation: async () => ({ invitation: invitation({ bound_email: 'alex@example.test', mail: { state: 'queued' } }) }) } });
-  await h.flush(); await h.advance(122000); assert.match(h.text(), /still queued/);
+  await h.flush(); await h.input('reg-email', 'alex@example.test'); await h.submit(); await h.advance(2000);
+  await h.advance(122000); assert.match(h.text(), /still queued/);
   assert.equal(h.nodes(node => node.props['aria-busy'] === true).length, 0); const count = h.calls.length;
   await h.advance(10000); assert.equal(h.calls.length, count); assert.match(h.text(), /Check status/); h.unmount();
 });
@@ -338,4 +384,15 @@ test('proof validation is ungated and final account creation remains human-gated
   const h = bffFixture(); await h.request('/api/register/validate', { email: 'alex@example.test', token: 'synthetic-proof', password: 'ignored' });
   assert.deepEqual(h.calls.map(call => call[0]), ['/internal/register/validate']); assert.equal(h.calls[0][1].password, undefined);
   const denied = bffFixture({ human: false }); await denied.request('/api/register/complete', {}); assert.deepEqual(denied.calls, [['turnstile']]);
+});
+
+test('BFF defers code and email policy to SSO after the human gate, including malformed supplied values', async () => {
+  const h = bffFixture();
+  await h.request('/api/register/start', { email: 'not-an-email', code: 'not-a-code' });
+  assert.deepEqual(h.calls.map(call => call[0]), ['turnstile', 'session', '/internal/register/start']);
+  assert.equal(h.calls[2][1].email, 'not-an-email');
+  assert.equal(h.calls[2][1].code, 'NOT-A-CODE');
+  const denied = bffFixture({ human: false });
+  await denied.request('/api/register/start', { email: 'not-an-email', code: 'not-a-code' });
+  assert.deepEqual(denied.calls, [['turnstile']]);
 });

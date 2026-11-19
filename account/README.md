@@ -76,6 +76,11 @@ an explicit resend is a new operation. The share link contains the invitation co
 the mailbox-verification link is sent only to the bound address. Opening a link or
 previewing an invitation does not send mail or consume it.
 
+The first registration form shows email and Turnstile together. When invitation-only
+registration is enabled, it also requires a code; when disabled, supplied codes are
+ignored. After human verification, the SSO checks the invitation before validating
+the email. There is no separate code-preflight screen.
+
 The BFF gates anonymous email requests/resends and final sign-up with Turnstile.
 Invitation preview and token-gated username checks do not require an extra challenge.
 The SSO atomically creates the account, assigns its role and consumes the invitation.

@@ -30,6 +30,7 @@ test('invitation mail and account creation share durable single-use state',async
  const {queueInvitationMail,drainInvitationMail,readInvitationProof,invitationProofHash}=await import('../src/invitationMail.js');
  const {commitRegistration}=await import('../src/registrationStore.js');
  const {registerRouter}=await import('../src/routes/register.js');
+ const {setSetting}=await import('../src/settings.js');
  const {orgRouter}=await import('../src/routes/org.js');
  // Execute the actual Express route's complete middleware stack. Only the HTTP
  // transport is replaced: auth, signed operation checks, SQL and Redis are real.
@@ -166,6 +167,31 @@ test('invitation mail and account creation share durable single-use state',async
    assert.equal((await pool.query('SELECT bound_email FROM invitation_codes WHERE id=$1',[inv.id])).rows[0].bound_email,other);
    assert.equal((await pool.query('SELECT 1 FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rowCount,1);
    await drainInvitationMail({database:pool,send});assert.ok(delivered.get(other));
+  });
+  await t.test('enabled invitation authority is checked before email validation on the actual route',async()=>{
+   const path='/internal/register/start';
+   await setSetting('require_invitation_code','true');
+   for(const code of ['', 'not-a-code']){
+    const response=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code});
+    assert.equal(response.statusCode,422);assert.equal(response.body.errors.code,'invalid_code');
+   }
+   const absent=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:'ZZZZZZZZZZZZ'});
+   assert.equal(absent.statusCode,422);assert.equal(absent.body.error,'invalid_invitation');
+   const inv=await tx(async db=>(await createInvitation(db,actor,{request_id:randomUUID(),role_slug:'member',delivery:'link'})).invitation);
+   await pool.query("UPDATE invitation_codes SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[inv.id]);
+   const expired=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:inv.code});
+   assert.equal(expired.statusCode,409);assert.equal(expired.body.error,'invitation_expired');
+  });
+  await t.test('disabled invitations ignore even malformed supplied codes and use email-only registration',async()=>{
+   const path='/internal/register/start';await setSetting('require_invitation_code','false');
+   try{
+    const badEmail=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:'not-a-code'});
+    assert.equal(badEmail.statusCode,422);assert.equal(badEmail.body.errors.email,'invalid_email');
+    const validEmail=await route(registerRouter,path,path,{...await assertion(path),email:mailbox(),code:'not-a-code',request_id:'ignored'});
+    // This isolated fixture deliberately has no provider credentials. Reaching
+    // the open-registration mail configuration guard proves the code was ignored.
+    assert.equal(validEmail.statusCode,503);assert.equal(validEmail.body.error,'email_not_configured');
+   }finally{await setSetting('require_invitation_code','true');}
   });
   await t.test('actual admin resend handler returns429 and rolls back receipt/audit, then same request queues once',async()=>{
    const inv=await make();await drainInvitationMail({database:pool,send});const requestId=randomUUID();

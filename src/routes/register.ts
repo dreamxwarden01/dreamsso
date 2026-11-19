@@ -72,8 +72,11 @@ registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>
   const body=req.body??{};
   if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
   if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
-  const email=qstr(body.email).trim().toLowerCase(),code=qstr(body.code).trim().toUpperCase();
-  if((await invitationRequired()) || code){
+  const requireCode=await invitationRequired();
+  const email=qstr(body.email).trim().toLowerCase();
+  // When invitations are disabled, even a stale or malicious supplied code is ignored.
+  const code=requireCode?qstr(body.code).trim().toUpperCase():'';
+  if(requireCode){
     if(!CODE_RE.test(code))return res.status(422).json({errors:{code:'invalid_code'}});
     if(body.request_id!==undefined&&!UUID_RE.test(qstr(body.request_id)))return res.status(422).json({error:'invalid_request_id'});
     try {
