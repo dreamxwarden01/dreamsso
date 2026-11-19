@@ -96,7 +96,7 @@ export function CreateInvitationDialog({ actor, initialForm, onClose, onCreate }
         {draftNotice && <p className="iv-fhint" role="status">{draftNotice}</p>}
       </fieldset>
       <div className="iv-cp-foot"><p className={'iv-cp-status' + (error ? ' iv-err' : '')} role={error ? 'alert' : 'status'}><InvitationIcon name={error ? 'alert' : 'clock'} className="iv-ico-14"/><span>{error || `Expires about ${formatInvitationTime(Date.now() + form.validity_hours * 3600000)}`}</span></p><div className="iv-cp-btns"><button type="button" className="iv-btn" disabled={busy} onClick={() => modal.current.close()}>Cancel</button>
-        <InvitationButton type="submit" label={form.delivery === 'email' ? 'Send invitation' : 'Create link'} phase={feedback.phase} busyLabel="Creating…" doneLabel="Created" failLabel="Not created" icon={form.delivery === 'email' ? 'mail' : 'link'} className="iv-btn-primary iv-cp-submit" disabled={!form.role_slug || busy}/></div></div>
+        <InvitationButton type="submit" label={form.delivery === 'email' ? 'Send invitation' : 'Create invitation'} phase={feedback.phase} busyLabel="Creating…" doneLabel="Created" failLabel="Not created" icon={form.delivery === 'email' ? 'mail' : 'link'} className="iv-btn-primary iv-cp-submit" disabled={!form.role_slug || busy}/></div></div>
     </form>}</div>
   </InvitationModal>;
 }
