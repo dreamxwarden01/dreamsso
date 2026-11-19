@@ -41,12 +41,20 @@ export function RecipientButton({ feedback, rest, busy = 'Sending…', done = 'Q
 }
 
 export function RecipientError({ error }) {
-  return <div className="recipient-feedback" aria-live="polite">
-    {error && <div className="auth-err" role="alert">{typeof error === 'string' ? error : error.msg}</div>}
+  const message = typeof error === 'string' ? error : typeof error?.msg === 'string' ? error.msg : '';
+  const [retained, setRetained] = useState(message);
+  // Keep the last visual text while the grid closes. No timer can clear a newer error.
+  if (message && message !== retained) setRetained(message);
+  const open = !!message;
+  return <div className="recipient-feedback" data-open={open}>
+    <div className="recipient-feedback-clip" aria-hidden={!open} inert={!open}>
+      {(message || retained) && <div key={open ? 'open' : 'closed'} className="auth-err" role={open ? 'alert' : undefined}>{message || retained}</div>}
+    </div>
   </div>;
 }
 
 export function InvitationMeta({ invitation, expiresAt }) {
+  if (!invitation?.code && !invitation?.label && !expiresAt && !invitation?.expires_at) return null;
   return <div className="recipient-meta">
     {invitation?.code && <div>Invitation <code>{invitation.code}</code></div>}
     {invitation?.label && <div>{invitation.label}</div>}
