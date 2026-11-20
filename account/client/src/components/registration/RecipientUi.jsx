@@ -62,13 +62,14 @@ export function InvitationMeta({ invitation, expiresAt }) {
   </div>;
 }
 
-export function LockedEmail({ email, hint = 'This invitation is for this address and cannot be changed.' }) {
-  return <div className="auth-grp">
+export function LockedEmail({ email, hint = 'This invitation is for this address and cannot be changed.', error }) {
+  return <div className={'auth-grp' + (error ? ' bad' : '')}>
     <label htmlFor="recipient-email">Email address</label>
     <div className="recipient-lock-wrap">
-      <input id="recipient-email" className="auth-input recipient-locked" value={email} readOnly aria-readonly="true" autoComplete="email" />
+      <input id="recipient-email" className="auth-input recipient-locked" value={email} readOnly aria-readonly="true" aria-invalid={!!error} aria-describedby={error ? 'recipient-email-error' : undefined} autoComplete="email" />
       <Icon name="lock" size={16} />
     </div>
+    {error && <span id="recipient-email-error" className="auth-ferr" role="alert">{error}</span>}
     <span className="recipient-hint">{hint}</span>
   </div>;
 }

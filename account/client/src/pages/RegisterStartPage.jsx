@@ -5,11 +5,18 @@ import AuthCard from '../components/AuthCard.jsx';
 import Turnstile from '../components/Turnstile.jsx';
 import Icon from '../components/Icon.jsx';
 import { registerInvitation, registerStart } from '../api.js';
-import { EMAIL_RE, emailValid, normalizeCode, invitationStatus,
+import { EMAIL_RE, emailValid, normalizeCode, INVITATION_CODE_RE, invitationStatus,
   invitationErrorStatus, registrationMessage, registrationRequestId, formatInvitationTime } from '../components/registration/invitation.js';
 import { InvitationMeta, LockedEmail, RecipientButton, RecipientError, RecipientNotice, useRecipientFeedback } from '../components/registration/RecipientUi.jsx';
 
 const TERMINAL_MAIL = ['sent', 'failed', 'unknown'];
+const codeReason = (status, value) => ({
+  expired: 'This invitation has expired. Ask for a new invitation.',
+  used: 'This invitation has already been used.',
+  revoked: 'This invitation has been revoked. Ask for a new invitation.',
+  unavailable: 'This invitation is no longer available. Ask for a new invitation.',
+  invalid: 'This invitation code was not found. Check it and try again.',
+})[status] || (value ? 'This invitation code is invalid. Check it and try again.' : 'An invitation code is required.');
 
 export default function RegisterStartPage() {
   const { siteName, registrationEnabled, invitationRequired, turnstileSiteKey, ssoUrl, refreshSite } = useSite();
@@ -98,8 +105,10 @@ export default function RegisterStartPage() {
   const shownEmail = boundEmail || attemptedEmail || email;
   const cooldown = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
   const queued = ['queued', 'sending'].includes(mailState);
-  const locked = !!boundEmail || uncertain || feedback.busy;
+  const locked = !!boundEmail || uncertain || feedback.busy || feedback.phase === 'done';
   const humanReady = !turnstileSiteKey || !!turnstileToken;
+  // Keep request eligibility separate from whether blur has exposed an error.
+  const codeReady = !invitationRequired || (INVITATION_CODE_RE.test(code) && (phase !== 'form' || !codeErr));
 
   async function checkStatus() {
     if (!invitation?.code || checkingStatus) return;
@@ -117,14 +126,14 @@ export default function RegisterStartPage() {
 
   async function submit(event) {
     event?.preventDefault();
-    if (feedback.held || queued || cooldown > 0 || !humanReady || effectiveNotice) return;
+    if (feedback.held || queued || cooldown > 0 || !humanReady || !codeReady || effectiveNotice) return;
     const address = (boundEmail || (phase === 'sent' ? attemptedEmail : email)).trim().toLowerCase();
     if (!emailValid(address)) { setEmailErr(EMAIL_RE.test(address) ? 'Email addresses are at most 254 characters.' : 'Enter a valid email address.'); return; }
     const submittedCode = invitationRequired ? code || undefined : undefined;
     if (invitation && invitationStatus(invitation) !== 'unused') { setNotice(invitationStatus(invitation)); return; }
     const operationSeq = ceremonySeq.current;
     if (!feedback.start()) return;
-    setFormErr(null); setEmailErr(null); setAttemptedEmail(address);
+    setFormErr(null); setEmailErr(null); setCodeErr(null); setAttemptedEmail(address);
     const key = (submittedCode || '') + ':' + address;
     if (submittedCode && (!requestRef.current || requestRef.current.key !== key || (confirmedRequest.current && TERMINAL_MAIL.includes(mailState)))) {
       requestRef.current = { key, id: registrationRequestId(submittedCode, address, confirmedRequest.current) };
@@ -144,22 +153,27 @@ export default function RegisterStartPage() {
         : TERMINAL_MAIL.includes(reportedMail) ? reportedMail : 'sent';
       setMailState(nextMail); setSendDoneLabel(nextMail === 'sent' ? 'Sent' : 'Queued');
       setTurnstileToken(null); resetRef.current?.();
-      feedback.finish(['failed', 'unknown'].includes(nextMail) ? 'fail' : 'done', () => setPhase('sent'));
+      feedback.finish(['failed', 'unknown'].includes(nextMail) ? 'fail' : 'done', () => {
+        if (mounted.current && operationSeq === ceremonySeq.current) setPhase('sent');
+      });
     } catch (err) {
       if (!mounted.current || operationSeq !== ceremonySeq.current) return;
       let showSendStatus = false;
       setTurnstileToken(null); resetRef.current?.();
-      if (err.data?.invitation) {
+      const fields = err.data?.errors || {};
+      const ended = err.status >= 400 && err.status < 500 ? invitationErrorStatus(err) : null;
+      const inlineCodeIssue = phase === 'form' && invitationRequired && err.status >= 400 && err.status < 500 && (fields.code || ended);
+      if (err.data?.invitation && !inlineCodeIssue) {
         applyInvitation(err.data.invitation);
         showSendStatus = err.data.invitation.mail?.state !== 'none' && !!err.data.invitation.mail?.state;
       }
-      const ended = invitationErrorStatus(err);
-      if (ended && ended !== 'invalid') setNotice(ended);
-      const fields = err.data?.errors || {};
-      if (fields.email === 'email_taken' || err.code === 'email_taken') setEmailErr('This email address is already registered.');
+      if (ended && ended !== 'invalid' && !inlineCodeIssue) setNotice(ended);
+      if (inlineCodeIssue) setCodeErr(codeReason(ended, code));
+      else if (fields.email === 'email_taken' || err.code === 'email_taken') setEmailErr('This email address is already registered.');
       else if (fields.email || err.code === 'invalid_email') setEmailErr('Enter a valid email address.');
-      else if (fields.code || ended === 'invalid') setCodeErr(code ? 'This invitation code is invalid or cannot be used.' : 'An invitation code is required.');
+      else if (fields.code || ended === 'invalid') setCodeErr(codeReason(ended, code));
       else setFormErr(registrationMessage(err));
+      if (!invitationRequired && (fields.code || ended === 'invalid')) refreshSite();
       if (err.code === 'registration_closed') { setNotice('closed'); refreshSite(); }
       if (err.code === 'turnstile_failed' && !turnstileSiteKey) refreshSite();
       if (err.status === 429) setCooldownUntil(Date.now() + Math.max(1, Number(err.data?.retry_after) || 60) * 1000);
@@ -168,7 +182,7 @@ export default function RegisterStartPage() {
           || (!invitation && ['send_failed', 'email_not_configured'].includes(err.code))) setUncertain(false);
       // Binding is authoritative even when sending failed. A read can discover
       // it, but cannot authorize a new UUID for this uncertain operation.
-      const reconcile = !err.status || err.status >= 500 || ['email_bound', 'email_mismatch'].includes(err.code) || (ended && ended !== 'invalid');
+      const reconcile = !inlineCodeIssue && (!err.status || err.status >= 500 || ['email_bound', 'email_mismatch'].includes(err.code) || (ended && ended !== 'invalid'));
       if (submittedCode && reconcile && !err.data?.invitation) {
         try {
           const data = await registerInvitation(submittedCode);
@@ -178,7 +192,9 @@ export default function RegisterStartPage() {
           }
         } catch { /* keep the entered address locked until the request is resolved */ }
       }
-      feedback.finish('fail', () => { if (showSendStatus) setPhase('sent'); });
+      feedback.finish('fail', () => {
+        if (mounted.current && operationSeq === ceremonySeq.current && showSendStatus) setPhase('sent');
+      });
     }
   }
 
@@ -200,7 +216,7 @@ export default function RegisterStartPage() {
       {!queued && cooldown <= 0 && <Turnstile onToken={setTurnstileToken} onExpire={() => setTurnstileToken(null)} onError={() => setTurnstileToken(null)} resetRef={resetRef} />}
       <RecipientButton type="button" onClick={submit} feedback={feedback} rest={queued ? 'Queued for sending' : cooldown > 0 ? `Resend in ${cooldown}s` : uncertain ? 'Retry request' : 'Resend email'}
         done={sendDoneLabel} fail="Not sent" disabled={queued || cooldown > 0 || !humanReady} />
-      <RecipientError error={formErr || pollError || (failed ? 'We could not send the email. Try sending again to the same address.' : unknown ? 'A previous email may still arrive. You can request another for the same address.' : null)} />
+      <RecipientError error={formErr || emailErr || codeErr || pollError || (failed ? 'We could not send the email. Try sending again to the same address.' : unknown ? 'A previous email may still arrive. You can request another for the same address.' : null)} />
       {invitation ? <p className="recipient-meta">Wrong address? Ask the person who invited you for a new invitation. This one cannot move to another address.</p>
         : <a className="recipient-signin" href="/register/start">Use a different address</a>}
       <InvitationMeta invitation={invitation} />
@@ -212,27 +228,30 @@ export default function RegisterStartPage() {
     cta={<>Already have an account? <a href={signInHref}>Sign in</a></>}>
     {invitation && <div className="auth-chip"><span>Invitation <code>{invitation.code}</code></span></div>}
     <form className="recipient-form" noValidate onSubmit={submit}>
-      {boundEmail ? <LockedEmail email={boundEmail} /> : <div className={'auth-grp' + (emailErr ? ' bad' : '')}>
+      {boundEmail ? <LockedEmail email={boundEmail} error={emailErr} /> : <div className={'auth-grp' + (emailErr ? ' bad' : '')}>
         <label htmlFor="reg-email">Email address</label><input id="reg-email" type="email" inputMode="email" className="auth-input" autoFocus autoComplete="email" autoCapitalize="none" autoCorrect="off" spellCheck="false" maxLength={254}
+          aria-invalid={!!emailErr} aria-describedby={emailErr ? 'reg-email-error' : undefined}
           readOnly={locked} value={email} onChange={(event) => { setEmail(event.target.value.replace(/\s/g, '')); setEmailErr(null); }}
           onBlur={() => { if (email && !emailValid(email.trim())) setEmailErr('Enter a valid email address.'); }} />
-        <span className="auth-ferr">{emailErr}</span>
+        <span id="reg-email-error" className="auth-ferr" role={emailErr ? 'alert' : undefined}>{emailErr}</span>
         {invitation && <span className="recipient-hint">The first address submitted is tied to this invitation permanently.</span>}
       </div>}
       {invitationRequired && <div className={'auth-grp' + (codeErr ? ' bad' : '')}>
         <label htmlFor="reg-code">Invitation code</label>
-        <input id="reg-code" className="auth-input mono" value={code} autoComplete="off" autoCapitalize="characters" autoCorrect="off" spellCheck="false" maxLength={12}
-          required aria-required="true" readOnly={feedback.held || uncertain || !!boundEmail}
+        <input id="reg-code" className="auth-input mono" value={code} autoComplete="off" autoCapitalize="characters" autoCorrect="off" spellCheck="false" maxLength={64}
+          required aria-required="true" aria-invalid={!!codeErr} aria-describedby={codeErr ? 'reg-code-error' : undefined}
+          onBlur={() => { if (!INVITATION_CODE_RE.test(code)) setCodeErr(code ? 'Use a 12-character invitation code containing only A–Z and 0–9.' : 'An invitation code is required.'); }}
+          readOnly={feedback.busy || feedback.phase === 'done' || uncertain || !!boundEmail}
           onChange={(event) => {
             ceremonySeq.current++; setCode(normalizeCode(event.target.value)); setCodeErr(null);
             setInvitation(null); setNotice(null); setMailState('none');
             requestRef.current = null; confirmedRequest.current = false;
           }} />
-        <span className="auth-ferr">{codeErr}</span>
+        <span id="reg-code-error" className="auth-ferr" role={codeErr ? 'alert' : undefined}>{codeErr}</span>
       </div>}
       <Turnstile onToken={setTurnstileToken} onExpire={() => setTurnstileToken(null)} onError={() => setTurnstileToken(null)} resetRef={resetRef} />
-      <RecipientButton type="submit" feedback={feedback} rest={uncertain ? 'Retry request' : 'Send registration email'} done={invitation ? sendDoneLabel : 'Sent'} fail="Not sent" disabled={!emailValid((boundEmail || email).trim()) || !humanReady || cooldown > 0} />
-      <RecipientError error={formErr || emailErr || codeErr} />
+      <RecipientButton type="submit" feedback={feedback} rest={uncertain ? 'Retry request' : 'Send registration email'} done={invitation ? sendDoneLabel : 'Sent'} fail="Not sent" disabled={!emailValid((boundEmail || email).trim()) || !codeReady || !humanReady || cooldown > 0} />
+      <RecipientError error={formErr || (!invitationRequired ? codeErr : null)} />
     </form>
     <InvitationMeta invitation={invitation} />
   </AuthCard>;

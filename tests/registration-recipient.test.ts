@@ -26,15 +26,16 @@ const invitation = (patch = {}) => ({ code: 'ABCD1234EFGH', label: 'Course acces
 // deterministic hook scheduling and browser/API dependencies. No replica of the
 // page state machine, external DOM, live settings, network or credentials.
 function clientFixture(page: 'start' | 'complete' = 'start', options: Record<string, any> = {}) {
-  let time = now, dirty = true, index = 0, tree: any, nextTimer = 0, sequence = 0;
+  let time = now, dirty = true, index = 0, tree: any, nextTimer = 0, sequence = 0, tokenResets = 0, siteRefreshes = 0, stateUpdates = 0;
   const slots: any[] = [], effects: Function[] = [], timers = new Map<number, any>(), calls: any[] = [], redirects: string[] = [];
   const storage = options.storage || new Map();
+  const finishCallbacks: { phase: string; callback: Function }[] = [];
   let params = new URLSearchParams(options.query ?? (page === 'start' ? 'code=ABCD1234EFGH' : 'email=alex%40example.test&token=synthetic-proof'));
   const settings = { siteName: 'Example', registrationEnabled: true, invitationRequired: true, turnstileSiteKey: null, ...options.site };
   const react = {
     useState(initial: any) { const slot = index++; if (!slots[slot]) slots[slot] = { value: typeof initial === 'function' ? initial() : initial };
       return [slots[slot].value, (next: any) => { const value = typeof next === 'function' ? next(slots[slot].value) : next;
-        if (!Object.is(value, slots[slot].value)) { slots[slot].value = value; dirty = true; } }]; },
+        if (!Object.is(value, slots[slot].value)) { slots[slot].value = value; dirty = true; stateUpdates++; } }]; },
     useRef(initial: any) { const slot = index++; if (!slots[slot]) slots[slot] = { current: initial }; return slots[slot]; },
     useEffect(effect: Function, deps: any[]) { const slot = index++, previous = slots[slot];
       if (!previous || deps.some((value, n) => !Object.is(value, previous.deps[n]))) {
@@ -58,6 +59,16 @@ function clientFixture(page: 'start' | 'complete' = 'start', options: Record<str
   const ui = sourceModule('account/client/src/components/registration/RecipientUi.jsx', {
     react, 'react/jsx-runtime': runtime, '../Icon.jsx': { __esModule: true, default: Icon }, './invitation.js': helpers, './recipient.css': {},
   }, globals);
+  // Observe the page's actual delayed continuations without replacing either
+  // their implementation or the real feedback hook/timer. Tests can deliver a
+  // captured continuation after a ceremony switch, independently of cancellation.
+  const actualUseFeedback = ui.useRecipientFeedback;
+  const observedUi = { ...ui, useRecipientFeedback: (...args: any[]) => {
+    const feedback = actualUseFeedback(...args);
+    return { ...feedback, finish: (phase: string, callback: Function) => {
+      finishCallbacks.push({ phase, callback }); return feedback.finish(phase, callback);
+    } };
+  } };
   const defaults: any = {
     registerInvitation: async () => ({ invitation: invitation() }),
     registerStart: async () => ({ queued: true, sent: false, email: 'alex@example.test', bound_email: 'alex@example.test', resend_backoff: 60,
@@ -72,12 +83,16 @@ function clientFixture(page: 'start' | 'complete' = 'start', options: Record<str
   const passwordRules = sourceModule('account/client/src/components/PasswordRules.jsx', { 'react/jsx-runtime': runtime }, globals);
   const Page = sourceModule('account/client/src/pages/' + (page === 'start' ? 'RegisterStartPage.jsx' : 'RegisterCompletePage.jsx'), {
     react, 'react/jsx-runtime': runtime, 'react-router-dom': { useSearchParams: () => [params] },
-    '../context/SiteContext.jsx': { useSite: () => ({ ...settings, refreshSite() {} }) },
+    '../context/SiteContext.jsx': { useSite: () => ({ ...settings, refreshSite() { siteRefreshes++; } }) },
     '../components/AuthCard.jsx': { __esModule: true, default: (props: any) => jsx('auth-card', { ...props, children: [props.title, props.sub, props.children, props.cta] }) },
-    '../components/Turnstile.jsx': { __esModule: true, default: (props: any) => settings.turnstileSiteKey ? jsx('turnstile', props) : null },
+    '../components/Turnstile.jsx': { __esModule: true, default: (props: any) => {
+      if (!settings.turnstileSiteKey) return null;
+      if (props.resetRef) props.resetRef.current = () => { tokenResets++; };
+      return jsx('turnstile', props);
+    } },
     '../components/Icon.jsx': { __esModule: true, default: Icon },
     '../components/PasswordRules.jsx': passwordRules,
-    '../api.js': api, '../components/registration/invitation.js': helpers, '../components/registration/RecipientUi.jsx': ui,
+    '../api.js': api, '../components/registration/invitation.js': helpers, '../components/registration/RecipientUi.jsx': observedUi,
   }, globals).default;
   function expand(node: any): any {
     if (Array.isArray(node)) return node.map(expand);
@@ -91,7 +106,8 @@ function clientFixture(page: 'start' | 'complete' = 'start', options: Record<str
     return [...(predicate(node) ? [node] : []), ...walk(node.props?.children, predicate)];
   }
   const fixture = {
-    calls, redirects, storage, helpers,
+    calls, redirects, storage, helpers, uuidCount: () => sequence, tokenResetCount: () => tokenResets,
+    refreshCount: () => siteRefreshes, stateUpdateCount: () => stateUpdates, finishCallbacks,
     async flush() {
       for (let n = 0; n < 30; n++) {
         if (dirty) { dirty = false; index = 0; tree = Page(); for (const run of effects.splice(0)) run(); }
@@ -102,7 +118,11 @@ function clientFixture(page: 'start' | 'complete' = 'start', options: Record<str
     },
     nodes: (predicate: (node: any) => boolean) => walk(expand(tree), predicate),
     field(id: string) { const node = this.nodes(node => node.props.id === id)[0]; assert.ok(node, 'missing field ' + id); return node; },
+    // Delivers onChange, not a native paste. Browser maxLength is checked separately.
     async input(id: string, value: string) { this.field(id).props.onChange({ target: { value } }); await this.flush(); },
+    async blur(id: string) { const handler = this.field(id).props.onBlur; assert.equal(typeof handler, 'function', id + ' blur handler'); handler(); await this.flush(); },
+    actionButton() { const button = this.nodes(node => node.type === 'button' && node.props.className?.includes('recipient-button'))[0]; assert.ok(button); return button; },
+    openBanners() { return this.nodes(node => node.props.className === 'recipient-feedback' && node.props['data-open'] === true); },
     form() { const node = this.nodes(node => node.type === 'form')[0]; assert.ok(node, 'missing form'); return node; },
     async submit() { const pending = this.form().props.onSubmit({ preventDefault() {} }); await this.flush(); return pending; },
     text() { const collect = (node: any): string => Array.isArray(node) ? node.map(collect).join(' ') : !node ? '' : typeof node === 'object' ? collect(node.props?.children) : String(node);
@@ -146,23 +166,154 @@ test('manual code is submitted with email and human proof directly, without any 
   assert.equal(h.calls[0].args[2], 'synthetic-human-proof'); assert.ok(h.calls[0].args[3]); h.unmount();
 });
 
-for (const status of ['used', 'expired', 'revoked', 'unavailable']) test('send endpoint terminal state ' + status + ' is preserved after human-gated submission', async () => {
-  const h = clientFixture('start', { api: { registerStart: async () => { throw { status: 409, code: 'invitation_' + status, data: { invitation: invitation({ status }) } }; } } });
-  await h.flush(); assert.equal(h.calls.length, 0); await h.input('reg-email', 'alex@example.test'); await h.submit();
-  assert.equal(h.nodes(node => node.type === 'form').length, 0); assert.equal(h.calls.length, 1);
-  assert.match(h.text(), status === 'used' ? /already been used/ : status === 'expired' ? /has expired/ : status === 'revoked' ? /was withdrawn/ : /no longer available/); h.unmount();
+for (const status of ['used', 'expired', 'revoked', 'unavailable']) for (const withMetadata of [false, true]) {
+  test('first-form ' + status + ' code is an editable inline issue without a read or banner' + (withMetadata ? ' (bound metadata)' : ''), async () => {
+    const h = clientFixture('start', { api: { registerStart: async () => { throw { status: 409, code: 'invitation_' + status,
+      ...(withMetadata ? { data: { invitation: invitation({ status, bound_email: 'alex@example.test' }) } } : {}),
+    }; } } });
+    await h.flush(); assert.equal(h.calls.length, 0); await h.input('reg-email', 'alex@example.test'); await h.submit();
+    assert.equal(h.nodes(node => node.type === 'form').length, 1); assert.deepEqual(h.calls.map(call => call.name), ['registerStart']);
+    const message = h.field('reg-code-error').props.children;
+    assert.match(message, status === 'used' ? /used/i : status === 'expired' ? /expired/i : status === 'revoked' ? /withdrawn|revoked/i : /available|offered|changed|eligible/i);
+    assert.equal(h.field('reg-code').props['aria-invalid'], true); assert.equal(h.field('reg-code').props['aria-describedby'], 'reg-code-error');
+    assert.equal(h.field('reg-code').props.readOnly, false); assert.equal(h.openBanners().length, 0); h.unmount();
+  });
+}
+
+for (const [raw, normalized] of [['', ''], ['A', 'A'], ['ABCD1234EFG', 'ABCD1234EFG'], ['abc-12!', 'ABC12']]) {
+  test('required malformed code is blocked locally without spending a human proof: ' + (raw || 'empty'), async () => {
+    const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
+    await h.flush(); await h.input('reg-email', 'alex@example.test'); if (raw) await h.input('reg-code', raw);
+    h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-unspent-human-proof'); await h.flush();
+    assert.equal(h.field('reg-code').props.value, normalized); assert.equal(h.actionButton().props.disabled, true);
+    // Invoke the actual form handler directly: disabled-button DOM behavior is
+    // insufficient protection against Enter/programmatic submit paths.
+    await h.submit(); await h.advance(2500);
+    assert.deepEqual(h.calls, []); assert.equal(h.uuidCount(), 0); assert.equal(h.storage.size, 0); assert.equal(h.tokenResetCount(), 0);
+    await h.input('reg-code', 'ABCD1234EFGH'); assert.equal(h.actionButton().props.disabled, false);
+    await h.submit(); assert.equal(h.calls[0].name, 'registerStart'); assert.equal(h.calls[0].args[2], 'synthetic-unspent-human-proof');
+    assert.equal(h.uuidCount(), 1); h.unmount();
+  });
+}
+
+test('code blur marks invalid syntax inline; typing clears only the mark until the next blur', async () => {
+  const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush();
+  assert.equal(h.field('reg-code').props['aria-invalid'], false);
+  await h.blur('reg-code'); assert.equal(h.field('reg-code').props['aria-invalid'], true);
+  assert.equal(h.field('reg-code').props['aria-describedby'], 'reg-code-error');
+  assert.match(h.field('reg-code-error').props.children, /required/i); assert.equal(h.openBanners().length, 0);
+  await h.input('reg-code', 'SHORT'); assert.equal(h.field('reg-code').props['aria-invalid'], false);
+  assert.equal(h.field('reg-code-error').props.children, null); assert.equal(h.actionButton().props.disabled, true);
+  await h.blur('reg-code'); assert.equal(h.field('reg-code').props['aria-invalid'], true);
+  assert.match(h.field('reg-code-error').props.children, /12.character/i); assert.equal(h.openBanners().length, 0);
+  await h.input('reg-code', 'abcd-1234 efgh'); assert.equal(h.field('reg-code').props.value, 'ABCD1234EFGH');
+  assert.equal(h.field('reg-code').props['aria-invalid'], false); assert.equal(h.actionButton().props.disabled, false);
+  assert.equal(h.calls.length, 0); assert.equal(h.uuidCount(), 0); assert.equal(h.tokenResetCount(), 0); h.unmount();
 });
 
-for (const code of ['', 'BADBADBADBAD']) test('required code is checked by the send endpoint after human verification: ' + (code || 'missing'), async () => {
-  const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' },
-    api: { registerStart: async () => { throw code ? { status: 422, code: 'invalid_invitation' } : { status: 422, data: { errors: { code: 'invalid_code' } } }; } } });
-  await h.flush(); await h.input('reg-email', 'alex@example.test'); if (code) await h.input('reg-code', code);
-  await h.submit(); assert.equal(h.calls.length, 0);
+for (const error of [
+  { status: 422, data: { errors: { code: 'invalid_code' } } },
+  { status: 422, code: 'invalid_invitation' },
+]) test('well-formed unknown code has one inline server error, retained on blur until edited: ' + (error.code || 'errors.code'), async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => { throw error; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush();
+  assert.equal(h.actionButton().props.disabled, false); await h.submit(); await h.advance(2000);
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); assert.equal(h.calls[0].args[1], 'ABCD1234EFGH');
+  const message = h.field('reg-code-error').props.children;
+  assert.match(message, error.code ? /was not found/ : /is invalid/);
+  assert.equal(h.field('reg-code').props['aria-invalid'], true); assert.equal(h.field('reg-code').props['aria-describedby'], 'reg-code-error');
+  assert.equal(h.field('reg-code-error').props.role, 'alert'); assert.equal(h.openBanners().length, 0); assert.equal(h.tokenResetCount(), 1);
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-next-human-proof'); await h.flush();
+  assert.equal(h.actionButton().props.disabled, true); await h.blur('reg-code');
+  assert.equal(h.field('reg-code-error').props.children, message); await h.submit(); assert.equal(h.calls.length, 1);
+  await h.input('reg-code', 'ZXCV5678BNMQ'); assert.equal(h.field('reg-code').props['aria-invalid'], false);
+  assert.equal(h.actionButton().props.disabled, false); assert.equal(h.openBanners().length, 0); h.unmount();
+});
+
+test('a definite code error can be edited immediately during the two-second button feedback', async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => { throw { status: 422, code: 'invalid_invitation' }; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
   h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit();
-  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); assert.equal(h.calls[0].args[1], code || undefined);
-  assert.equal(h.calls[0].args[2], 'synthetic-human-proof'); await h.advance(2000);
-  assert.equal(h.field('reg-email').props.value, 'alex@example.test'); assert.equal(h.field('reg-code').props.readOnly, false);
-  assert.match(h.text(), code ? /invalid or cannot be used/ : /invitation code is required/); h.unmount();
+  assert.equal(h.actionButton().props['data-phase'], 'fail'); assert.equal(h.field('reg-code').props.readOnly, false);
+  assert.equal(h.field('reg-code').props['aria-invalid'], true); await h.input('reg-code', 'SHORT');
+  assert.equal(h.field('reg-code').props['aria-invalid'], false); assert.equal(h.field('reg-code-error').props.children, null);
+  assert.equal(h.actionButton().props['data-phase'], 'fail'); assert.equal(h.openBanners().length, 0);
+  await h.blur('reg-code'); assert.equal(h.field('reg-code').props['aria-invalid'], true);
+  assert.match(h.field('reg-code-error').props.children, /12.character/i); assert.equal(h.calls.length, 1); h.unmount();
+});
+
+test('email blur and editing expose one inline error without opening a duplicate banner', async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' } });
+  await h.flush(); await h.input('reg-email', 'not-an-email');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush();
+  assert.equal(h.actionButton().props.disabled, true); assert.equal(h.field('reg-email').props['aria-invalid'], false);
+  await h.blur('reg-email'); assert.equal(h.field('reg-email').props['aria-invalid'], true);
+  assert.equal(h.field('reg-email').props['aria-describedby'], 'reg-email-error');
+  assert.match(h.field('reg-email-error').props.children, /valid email address/); assert.equal(h.openBanners().length, 0);
+  await h.input('reg-email', 'still-invalid'); assert.equal(h.field('reg-email').props['aria-invalid'], false);
+  assert.equal(h.actionButton().props.disabled, true); await h.blur('reg-email');
+  assert.equal(h.field('reg-email').props['aria-invalid'], true); assert.equal(h.openBanners().length, 0);
+  assert.equal(h.calls.length, 0); assert.equal(h.uuidCount(), 0); assert.equal(h.tokenResetCount(), 0); h.unmount();
+});
+
+for (const error of [
+  { status: 422, data: { errors: { email: 'email_taken' } } },
+  { status: 422, code: 'email_taken' },
+  { status: 422, data: { errors: { email: 'invalid_email' } } },
+  { status: 422, code: 'invalid_email' },
+]) test('recipient email server error is inline only: ' + (error.code ? 'error=' + error.code : 'errors.email=' + error.data?.errors.email), async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => { throw error; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  const message = h.field('reg-email-error').props.children;
+  assert.match(message, (error.code || error.data?.errors.email) === 'email_taken' ? /already registered/ : /valid email address/);
+  assert.equal(h.field('reg-email').props['aria-invalid'], true); assert.equal(h.field('reg-email').props['aria-describedby'], 'reg-email-error');
+  assert.equal(h.field('reg-email-error').props.role, 'alert'); assert.equal(h.openBanners().length, 0);
+  assert.equal(h.field('reg-email').props.value, 'alex@example.test'); assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); h.unmount();
+});
+
+test('a bound address displays its field error on LockedEmail without duplicating a banner', async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => { throw {
+    status: 422, data: { errors: { email: 'email_taken' }, invitation: invitation({ bound_email: 'alex@example.test' }) },
+  }; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  assert.equal(h.field('recipient-email').props.value, 'alex@example.test'); assert.equal(h.field('recipient-email').props.readOnly, true);
+  assert.equal(h.field('recipient-email').props['aria-invalid'], true); assert.equal(h.field('recipient-email').props['aria-describedby'], 'recipient-email-error');
+  assert.match(h.field('recipient-email-error').props.children, /already registered/);
+  assert.equal(h.field('recipient-email-error').props.role, 'alert'); assert.equal(h.openBanners().length, 0); h.unmount();
+});
+
+for (const field of ['email', 'code']) test('sent summary keeps a fallback banner when the missing editable field is ' + field, async () => {
+  let requests = 0;
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => {
+    if (++requests === 1) return { queued: false, sent: true, resend_backoff: 1,
+      invitation: invitation({ bound_email: 'alex@example.test', mail: { state: 'sent' } }) };
+    throw { status: 422, data: { errors: { [field]: field === 'email' ? 'email_taken' : 'invalid_code' } } };
+  } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-first-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  assert.equal(h.nodes(node => node.type === 'input').length, 0);
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-resend-human-proof'); await h.flush();
+  await h.actionButton().props.onClick(); await h.flush(); await h.advance(2000);
+  assert.equal(h.nodes(node => node.type === 'input').length, 0); assert.equal(h.openBanners().length, 1);
+  assert.match(h.text(), field === 'email' ? /already registered/ : /invitation code is invalid/);
+  assert.equal(h.calls.filter(call => call.name === 'registerStart').length, 2); h.unmount();
+});
+
+for (const error of [
+  { status: 0, code: 'timeout' }, { status: 403, code: 'turnstile_failed' },
+  { status: 429, code: 'rate_limited', data: { can_retry: true, retry_after: 60 } },
+  { status: 503, code: 'registration_unavailable' }, { status: 503, code: 'invitation_unavailable' },
+]) test('overall request failure retains its banner: ' + error.code, async () => {
+  const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => { throw error; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  assert.equal(h.openBanners().length, 1); assert.equal(h.field('reg-code').props['aria-invalid'], false);
+  assert.equal(h.field('reg-email').props['aria-invalid'], false); assert.equal(h.calls.filter(call => call.name === 'registerStart').length, 1); h.unmount();
 });
 
 test('a failed server human check does not trigger invitation lookup or consume the form fields', async () => {
@@ -195,6 +346,45 @@ test('queue acknowledgement is honest, send feedback holds two seconds, polling 
   await h.advance(6000); assert.equal(h.calls.length, count); h.unmount();
 });
 
+for (const result of [
+  { kind: 'legacy sent', reply: { sent: true, resend_backoff: 60 } },
+  { kind: 'queue without binding metadata', reply: { queued: true, sent: false, resend_backoff: 60 } },
+]) test('successful acknowledgement locks both fields throughout feedback: ' + result.kind, async () => {
+  const h = clientFixture('start', { api: { registerStart: async () => result.reply } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test'); await h.submit();
+  assert.equal(h.actionButton().props['data-phase'], 'done');
+  assert.equal(h.field('reg-email').props.readOnly, true); assert.equal(h.field('reg-code').props.readOnly, true);
+  await h.advance(1999); assert.equal(h.field('reg-email').props.readOnly, true); assert.equal(h.field('reg-code').props.readOnly, true);
+  assert.equal(h.field('reg-code').props.value, 'ABCD1234EFGH'); assert.equal(h.calls.length, 1);
+  await h.advance(1); assert.equal(h.nodes(node => node.type === 'form').length, 0); h.unmount();
+});
+
+for (const outcome of ['success', 'failure']) test('stale ' + outcome + ' finish continuation cannot replace a new invitation ceremony', async () => {
+  const h = clientFixture('start', { api: { registerStart: async () => {
+    if (outcome === 'success') return { queued: true, sent: false, resend_backoff: 60 };
+    throw { status: 503, code: 'mail_failed', data: { invitation: invitation({ mail: { state: 'failed' } }) } };
+  } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test'); await h.submit();
+  const finish = h.finishCallbacks.at(-1); assert.ok(finish); assert.equal(finish.phase, outcome === 'success' ? 'done' : 'fail');
+  await h.setQuery('code=ZXCV5678BNMQ'); assert.equal(h.field('reg-code').props.value, 'ZXCV5678BNMQ');
+  // Invoke the actual old callback even though reset cleared its timer. The
+  // page's captured operation generation must fence the deferred phase change.
+  finish.callback(); await h.flush(); await h.advance(2500);
+  assert.equal(h.nodes(node => node.type === 'form').length, 1); assert.equal(h.field('reg-code').props.value, 'ZXCV5678BNMQ');
+  assert.equal(h.field('reg-email').props.value, ''); assert.doesNotMatch(h.text(), /Email queued|mail provider accepted/);
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); h.unmount();
+});
+
+for (const outcome of ['success', 'failure']) test('unmounted ' + outcome + ' finish continuation cannot schedule a page state change', async () => {
+  const h = clientFixture('start', { api: { registerStart: async () => {
+    if (outcome === 'success') return { sent: true, resend_backoff: 60 };
+    throw { status: 503, code: 'mail_failed', data: { invitation: invitation({ mail: { state: 'failed' } }) } };
+  } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test'); await h.submit();
+  const finish = h.finishCallbacks.at(-1); assert.ok(finish); await h.flush(); h.unmount();
+  const before = h.stateUpdateCount(); finish.callback(); assert.equal(h.stateUpdateCount(), before);
+});
+
 test('uncertain send keeps its email locked and retries the exact same UUID', async () => {
   let sends = 0;
   const h = clientFixture('start', { api: { registerStart: async () => { if (++sends <= 2) throw { code: 'timeout', status: 0 }; } } });
@@ -220,6 +410,22 @@ for (const query of ['txn=synthetic-login-txn', 'code=ABCD1234EFGH&txn=synthetic
   await h.input('reg-email', 'alex@example.test'); h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
   assert.match(h.text(), /Check your email/); assert.match(h.text(), /30 minutes/); assert.equal(h.calls[0].args[1], undefined); assert.equal(h.calls[0].args[3], undefined);
   assert.equal(h.calls.filter(call => call.name === 'registerInvitation').length, 0); h.unmount();
+});
+
+for (const error of [
+  { status: 422, data: { errors: { code: 'invalid_code' } } },
+  { status: 422, code: 'invalid_invitation' },
+]) test('stale invitation-OFF settings expose the server code error and refresh settings: ' + (error.code || 'errors.code'), async () => {
+  const h = clientFixture('start', { query: 'code=ABCD1234EFGH&txn=synthetic-login-txn',
+    site: { invitationRequired: false, turnstileSiteKey: 'synthetic-site-key' },
+    api: { registerStart: async () => { throw error; } } });
+  await h.flush(); await h.input('reg-email', 'alex@example.test');
+  h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit(); await h.advance(2000);
+  assert.equal(h.nodes(node => node.props.id === 'reg-code').length, 0); assert.equal(h.openBanners().length, 1);
+  assert.match(h.text(), /invitation code/i); assert.equal(h.refreshCount(), 1); assert.equal(h.uuidCount(), 0);
+  assert.deepEqual(h.calls.map(call => call.name), ['registerStart']);
+  assert.equal(h.calls[0].args[1], undefined); assert.equal(h.calls[0].args[3], undefined);
+  assert.equal(h.field('reg-email').props.value, 'alex@example.test'); h.unmount();
 });
 
 test('definite free-registration mail failure leaves its email editable', async () => {
@@ -252,6 +458,14 @@ test('stale username availability responses cannot reject a newer username', asy
   await h.flush(); await h.input('reg-username', 'old_name'); h.field('reg-username').props.onBlur();
   await h.input('reg-username', 'new_name'); check.resolve({ available: false }); await h.flush();
   assert.doesNotMatch(h.text(), /already taken/); h.unmount();
+});
+
+for (const status of ['used', 'expired', 'revoked', 'unavailable']) test('emailed proof retains the full ' + status + ' terminal notice', async () => {
+  const h = clientFixture('complete', { api: { registerValidate: async () => { throw { status: 409, code: 'invitation_' + status,
+    data: { invitation: invitation({ status, bound_email: 'alex@example.test' }) } }; } } });
+  await h.flush(); assert.equal(h.nodes(node => node.type === 'form').length, 0);
+  assert.deepEqual(h.calls.map(call => call.name), ['registerValidate']);
+  assert.match(h.text(), status === 'used' ? /already been used/ : status === 'expired' ? /has expired/ : status === 'revoked' ? /was withdrawn/ : /no longer available/); h.unmount();
 });
 
 test('transport failure while checking a mail proof is retryable, not mislabeled expired', async () => {
