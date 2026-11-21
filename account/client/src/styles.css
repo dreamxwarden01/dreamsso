@@ -1,3 +1,4 @@
+:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
 /* DreamSSO account console — palette + components ported from docs/account-console-mockup.html
    (videosite's real tokens: #1a73e8 accent, #f0f2f5 bg, white cards, system font). */
 :root {
@@ -20,10 +21,12 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; }
+button, input, textarea, select { font-family: inherit; }
+code, kbd, samp, pre { font-family: var(--font-mono); }
 body {
   background: var(--bg);
   color: var(--tx);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.5;
 }
@@ -232,7 +235,7 @@ img.pmenu-av { object-fit: cover; display: block; }
 .keyfield { margin-top: 14px; max-width: 360px; }
 .keyfield > .k { display: block; margin-bottom: 5px; }
 .keybox { display: flex; align-items: stretch; border: 1px solid var(--bd2); border-radius: 8px; background: #f0f2f5; overflow: hidden; }
-.keytext { flex: 1; min-width: 0; align-self: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; letter-spacing: .03em; padding: 9px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--tx); }
+.keytext { flex: 1; min-width: 0; align-self: center; font-family: var(--font-mono); font-size: 14px; letter-spacing: .03em; padding: 9px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--tx); }
 .keycopy { flex-shrink: 0; display: flex; align-items: center; justify-content: center; border: 0; border-left: 1px solid var(--bd2); background: #fff; padding: 0 13px; cursor: pointer; color: var(--mut); }
 .keycopy:hover { background: #f8f9fa; color: var(--blue); }
 
@@ -247,8 +250,8 @@ img.pmenu-av { object-fit: cover; display: block; }
 .modal-title { font-size: 17px; font-weight: 600; margin: 0 0 8px; text-align: center; }
 .modal-msg { text-align: center; color: var(--mut); font-size: 14px; margin: 0 0 6px; }
 /* grey error code, matching videosite's [code] login style */
-.errcode { text-align: center; color: var(--faint); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 0 18px; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; }
+.errcode { text-align: center; color: var(--faint); font-size: 12px; font-family: var(--font-mono); margin: 0 0 18px; }
+.mono { font-family: var(--font-mono); letter-spacing: .04em; }
 .modal-actions { display: flex; gap: 10px; justify-content: center; }
 
 /* live password rules */

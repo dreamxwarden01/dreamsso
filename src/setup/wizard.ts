@@ -1,16 +1,19 @@
+import { BRAND_HEAD, BRAND_MARK } from '../branding.js';
 // The first-run /setup wizard — a self-contained, server-rendered page (no build
 // step). String.raw preserves the regex/CSS backslashes verbatim; only ${nonce}
 // interpolates. Wired to GET /setup/env, POST /setup/config, POST /setup/finish.
 export function renderWizard(nonce: string): string {
   return String.raw`<!DOCTYPE html><html lang="en"><head>
+${BRAND_HEAD}
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+
 <title>First-run setup · DreamSSO</title>
 <style nonce="${nonce}">
+:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
   *{box-sizing:border-box}
   :root{color-scheme:light}
   html,body{margin:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;
+  body{font-family:var(--font-ui);
     color:#1f2937;font-size:14px;line-height:1.5;min-height:100vh;
     background:#f1f0f7 url(/auth-bg.svg) center / auto no-repeat fixed;
     display:flex;align-items:center;justify-content:center;padding:24px}
@@ -83,7 +86,7 @@ export function renderWizard(nonce: string): string {
   .chk-body{min-width:0;flex:1}
   .chk-name{font-size:13px;font-weight:600;color:#1f2937}
   .chk-val{font-size:12px;color:#6b7280;margin-top:1px;
-    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+    font-family:var(--font-mono);word-break:break-all}
   .chk-note{font-size:12px;color:#6b7280;margin-top:1px}
   .switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
     padding:13px 15px;border:1px solid #e5e7eb;border-radius:12px;margin-bottom:4px}
@@ -130,8 +133,8 @@ export function renderWizard(nonce: string): string {
   .token-chip svg{color:#16a34a}
   .note{font-size:12.5px;color:#5c6470;background:#f4f6f8;border:1px solid #eceef1;border-radius:9px;padding:9px 12px;margin-bottom:16px}
   .note.warn{background:#fffaf0;border-color:#fbe4bf;color:#8a5a06}
-  .note code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-  input.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .note code{font-family:var(--font-mono);font-size:12px}
+  input.mono{font-family:var(--font-mono);font-size:12.5px}
   input:read-only{background:#f7f8fa;color:#6b7280;cursor:default}
   .gen-pill{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:#065f46;
     background:#d1fae5;border-radius:99px;padding:1px 8px;margin-left:6px;vertical-align:middle}
@@ -154,7 +157,7 @@ export function renderWizard(nonce: string): string {
   </p>
   <div class="card" id="card">
     <div class="brand">
-      <span class="badge"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><rect x="9.5" y="11.5" width="5" height="4" rx="1" stroke="#fff" stroke-width="1.6"/><path d="M10.5 11.5v-1a1.5 1.5 0 0 1 3 0v1" stroke="#fff" stroke-width="1.6"/></svg></span>
+      <span class="badge">${BRAND_MARK}</span>
       <span class="wordmark">DreamSSO</span>
     </div>
     <ol class="steps" id="stepper">

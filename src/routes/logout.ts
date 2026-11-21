@@ -26,7 +26,7 @@ logoutRouter.get('/logout', async (req: Request, res: Response) => {
   // white while every other auth page had the bloom.
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; img-src 'self'; style-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'self' 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
   );
   res.status(200).type('html').send(renderSignedOutPage(nonce, (await getSetting('site_name', 'DreamSSO'))!));
 });

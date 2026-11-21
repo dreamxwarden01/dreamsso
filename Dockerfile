@@ -13,6 +13,8 @@ COPY admin-ui/package*.json ./admin-ui/
 RUN cd admin-ui && npm ci
 COPY admin-ui/ ./admin-ui/
 COPY src/ ./src/
+COPY account/client/src/components/BrandMark.jsx ./account/client/src/components/BrandMark.jsx
+COPY account/client/public/brand ./account/client/public/brand
 RUN cd admin-ui && npm run build
 
 # ---- compile the server (src -> dist) ----
@@ -43,6 +45,7 @@ COPY --from=deps   /app/node_modules ./node_modules
 COPY --from=server /app/dist         ./dist
 COPY --from=admin  /app/admin-ui/dist ./admin-ui/dist
 COPY db/           ./db/
+COPY account/client/public/brand ./account/client/public/brand
 COPY package.json  ./
 # run unprivileged; the base image ships a `node` user (uid 1000)
 RUN mkdir -p /data/avatars && chown -R node:node /data /app

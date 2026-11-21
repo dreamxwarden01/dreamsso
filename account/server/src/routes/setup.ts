@@ -30,7 +30,7 @@ function serveUnavailable(res: Response): void {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; style-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'self' 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
   );
   res.status(503).type('html').send(renderUnavailablePage(nonce));
 }
@@ -79,7 +79,7 @@ setupRouter.get('/setup', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; img-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; ` +
+    `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'self' 'nonce-${nonce}'; script-src 'nonce-${nonce}'; ` +
       `connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`,
   );
   res.type('html').send(renderWizard(nonce));

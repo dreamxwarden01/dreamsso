@@ -1,3 +1,4 @@
+import { brandRouter, BRAND_HEAD } from './branding.js';
 import {ServiceLifecycle,installShutdownSignals,safeLifecycleError} from './lifecycle.js';
 import {closeS2SFetch,destroyS2SFetch} from './s2sFetch.js';
 import {stopClientKeyWorkers,killClientKeyWorkers} from './client-key-state.js';
@@ -76,6 +77,7 @@ app.use(express.urlencoded({ extended: false }));
 // The remaining routes use the same first-run gate as JWKS above: until configured,
 // nothing but /setup (token-gated) and /healthz answers — everything else gets a
 // neutral 503. Once configured it's a no-op and /setup 404s.
+app.use(brandRouter);
 app.use(setupGate);
 app.use(setupRouter);
 
@@ -151,7 +153,7 @@ app.use((req, res) => {
     .type('html')
     .send(
       '<!doctype html><meta charset="utf-8"><title>account console</title>' +
-        '<body style="font-family:-apple-system,system-ui,sans-serif;max-width:560px;margin:12vh auto;padding:0 20px;color:#1f2937">' +
+        BRAND_HEAD + '<body style="font-family:var(--font-ui,Geist,system-ui,sans-serif);max-width:560px;margin:12vh auto;padding:0 20px;color:#1f2937">' +
         '<h1 style="font-size:20px">Account console BFF is up</h1>' +
         '<p style="color:#6b7280">The SPA bundle isn\'t built yet. Build it with ' +
         '<code>npm --prefix account/client install &amp;&amp; npm --prefix account/client run build</code>, ' +

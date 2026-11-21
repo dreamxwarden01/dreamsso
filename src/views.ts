@@ -1,3 +1,5 @@
+import { BRAND_HEAD, BRAND_MARK, FAVICON_SVG } from './branding.js';
+export { FAVICON_SVG };
 import { AUTH_SHELL_CSS, AUTH_BACKGROUND } from './authPresentation.js';
 import { renderAuthMotionScript } from './authMotion.js';
 import { renderAuthNativeMotionScript } from './authNativeMotion.js';
@@ -7,12 +9,7 @@ function esc(s: string): string {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
-// Brand mark — the same shield-lock glyph as the account console's Icon, in white
-// for the gradient badge.
-const SHIELD = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-  <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
-  <rect x="9.5" y="11.5" width="5" height="4" rx="1" stroke="#fff" stroke-width="1.6"/>
-  <path d="M10.5 11.5v-1a1.5 1.5 0 0 1 3 0v1" stroke="#fff" stroke-width="1.6"/></svg>`;
+const SHIELD = BRAND_MARK;
 
 const CHECK = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
   <circle cx="12" cy="12" r="9" stroke="#065f46" stroke-width="2"/>
@@ -23,7 +20,7 @@ const SHIELD_X = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" ar
   <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" stroke="#b45309" stroke-width="2" stroke-linejoin="round"/>
   <path d="M9.5 10.5l5 5M14.5 10.5l-5 5" stroke="#b45309" stroke-width="2" stroke-linecap="round"/></svg>`;
 
-// Shared styles — the account console's design tokens (system font, #f0f2f5 bg,
+// Shared styles — the account console's design tokens (shared fonts, #f0f2f5 bg,
 // #fff card, #1a73e8 primary), so the SSO's server-rendered pages and the SPA feel
 // like one product. Nonce'd to satisfy the strict CSP (style-src 'nonce-…').
 // Legacy background endpoint retained for previously cached auth documents.
@@ -45,16 +42,10 @@ export const AUTH_BG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="2560"
 </g>
 </svg>`;
 
-// Brand favicon (same shield-lock as the account portal), served at /favicon.svg.
-// Referenced by every page's <head> via baseStyle().
-export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-<path d="M12 2.5l7.5 3.2v5.1c0 4.8-3.2 8-7.5 9.7-4.3-1.7-7.5-4.9-7.5-9.7V5.7z" fill="#1a73e8"/>
-<rect x="9" y="11" width="6" height="5" rx="1" fill="#fff"/>
-<path d="M10.2 11v-1.2a1.8 1.8 0 0 1 3.6 0V11" fill="none" stroke="#fff" stroke-width="1.6"/>
-</svg>`;
+
 
 function baseStyle(nonce: string): string {
-  return `<link rel="icon" type="image/svg+xml" href="/favicon.svg"><style nonce="${nonce}">
+  return `${BRAND_HEAD}<style nonce="${nonce}">
 ${AUTH_SHELL_CSS}
   ::view-transition-group(authcard){transform-origin:0 0}
   .brand{display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:18px}
@@ -82,7 +73,7 @@ ${AUTH_SHELL_CSS}
     outline:2px solid transparent;transition:border-color .15s,box-shadow .15s}
   input::placeholder{color:#9ca3af}
   input:focus{border-color:#1a73e8;box-shadow:0 0 0 3px rgba(26,115,232,.12)}
-  .btn{width:100%;padding:11px 16px;border:none;border-radius:10px;background:#1a73e8;color:#fff;
+  .btn{font-family:inherit;width:100%;padding:11px 16px;border:none;border-radius:10px;background:#1a73e8;color:#fff;
     font-size:14px;font-weight:600;cursor:pointer;transition:background .15s;margin-top:6px;
     box-shadow:0 1px 2px rgba(26,115,232,.4)}
   .btn:hover{background:#1557b0}
@@ -111,7 +102,7 @@ ${AUTH_SHELL_CSS}
   .resend{text-align:center;font-size:12px;color:#9ca3af;margin:12px 0 0}
   .resend button{background:none;border:0;padding:0;font:inherit;font-weight:600;color:#1a73e8;cursor:pointer}
   .resend button:disabled{color:#9ca3af;cursor:default}
-  .errcode{text-align:center;font-size:12px;color:#9ca3af;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:14px 0 0}
+  .errcode{text-align:center;font-size:12px;color:#9ca3af;font-family:var(--font-mono);margin:14px 0 0}
   .overlay{position:fixed;inset:0;background:rgba(17,24,39,.55);display:flex;align-items:center;justify-content:center;padding:24px;z-index:50}
   .overlay .card{max-width:340px;width:100%}
   [hidden]{display:none !important}

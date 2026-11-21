@@ -1,4 +1,4 @@
-.iv-ui{--line:var(--bd);--surface:#fff;--surface-2:#f8f9fa;--ink:var(--tx);--ink-2:#4b5563;--muted:var(--mut);--accent:var(--blue);--accent-soft:var(--blue-bg);--focus:var(--blue);--shadow-lg:0 10px 35px #17315120;--err:#c5221f;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.5;color:var(--tx)}
+.iv-ui{--line:var(--bd);--surface:#fff;--surface-2:#f8f9fa;--ink:var(--tx);--ink-2:#4b5563;--muted:var(--mut);--accent:var(--blue);--accent-soft:var(--blue-bg);--focus:var(--blue);--shadow-lg:0 10px 35px #17315120;--err:#c5221f;--mono:var(--font-mono);font-size:14px;line-height:1.5;color:var(--tx)}
 .iv-ui [hidden],.iv-ui[hidden]{display:none!important}.iv-ui button,.iv-ui input{font-family:inherit}.iv-ico{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none}.iv-ico svg{display:block;width:100%;height:100%}.iv-ico-12{width:12px;height:12px}.iv-ico-14{width:14px;height:14px}.iv-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.iv-new-btn{white-space:nowrap;flex-shrink:0}
 /* ── Buttons / inputs (Account) ── */
 .iv-btn{font-size:13px;line-height:1.5;padding:6px 13px;border:1px solid var(--bd2);background:#fff;border-radius:8px;cursor:pointer;color:var(--tx);display:inline-flex;align-items:center;gap:6px}
@@ -207,7 +207,7 @@
   background: #1f2937;
   color: #fff;
   box-shadow: 0 6px 20px rgba(0, 0, 0, .24);
-  font: 400 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 400 12px/1.45 var(--font-ui);
   white-space: normal;
   overflow-wrap: anywhere;
   opacity: 0;

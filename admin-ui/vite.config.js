@@ -6,6 +6,8 @@ import react from '@vitejs/plugin-react';
 // literally cannot drift.
 export default defineConfig({
   plugins: [react()],
+  // Shared Account JSX must use this app's React runtime in isolated image builds.
+  resolve: { dedupe: ['react', 'react-dom'] },
   base: '/admin/',
   build: {
     outDir: 'dist',

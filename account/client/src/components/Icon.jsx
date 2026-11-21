@@ -1,13 +1,8 @@
+import BrandMark from './BrandMark.jsx';
+
 // Inline stroke icons (tabler-style) — bundled, so no icon-font CDN and the
 // strict `script-src/style-src 'self'` CSP stays clean.
 const PATHS = {
-  'shield-lock': (
-    <>
-      <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
-      <rect x="9.5" y="11.5" width="5" height="4" rx="1" />
-      <path d="M10.5 11.5v-1a1.5 1.5 0 0 1 3 0v1" />
-    </>
-  ),
   user: (
     <>
       <circle cx="12" cy="8" r="4" />
@@ -170,6 +165,7 @@ const PATHS = {
 };
 
 export default function Icon({ name, size = 20, className }) {
+  if (name === 'shield-lock') return <BrandMark size={size} className={className} />;
   return (
     <svg
       className={className}

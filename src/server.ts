@@ -1,3 +1,4 @@
+import { brandRouter } from './branding.js';
 import {ServiceLifecycle,installShutdownSignals,safeLifecycleError} from './lifecycle.js';
 import {closeS2SFetch,destroyS2SFetch} from './s2sFetch.js';
 import express, { type ErrorRequestHandler } from 'express';
@@ -70,6 +71,7 @@ app.use((_req, res, next) => {
 app.use(securityHeaders);
 app.use(cookieParser());
 // The setup gate still protects the event channel before any body is parsed.
+app.use(brandRouter);
 app.use(setupGate);
 app.use(createJwksRouter(()=>getJwks()));
 app.use(EVENT_PATH, eventForm);

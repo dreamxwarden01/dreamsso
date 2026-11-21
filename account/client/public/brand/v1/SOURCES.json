@@ -1,0 +1,15 @@
+{
+  "Geist": {
+    "revision": "ef2597cfc42f4797676df105517ccc0a1cfa6569",
+    "source": "https://github.com/vercel/geist-font",
+    "license": "OFL-Geist.txt"
+  },
+  "Noto Sans": {
+    "packageVersion": "5.3.1",
+    "source": "https://github.com/fontsource/font-files",
+    "license": [
+      "noto-sans-sc/LICENSE",
+      "noto-sans-tc/LICENSE"
+    ]
+  }
+}

@@ -8,7 +8,11 @@ test('the stored Cloudflare page retains its widget contract without origin depe
     assert.equal(CHALLENGE_HTML.split(token).length - 1, 1);
   }
   assert.match(CHALLENGE_HTML, /<head>/);
-  assert.doesNotMatch(CHALLENGE_HTML, /<script|_cf_chl_opt|url\(|<link|<img|http-equiv/i);
+  const fontUrls = [...CHALLENGE_HTML.matchAll(/url\(([^)]+)\)/g)].map(match => match[1]);
+  assert.equal(fontUrls.length, 2);
+  for (const url of fontUrls) assert.match(url, /^data:font\/woff2;base64,[A-Za-z0-9+/=]+$/);
+  assert.ok(Buffer.byteLength(CHALLENGE_HTML) < 1_500_000);
+  assert.doesNotMatch(CHALLENGE_HTML, /<script|_cf_chl_opt|<link|<img|http-equiv/i);
   assert.match(CHALLENGE_HTML, /name="viewport" content="width=device-width, initial-scale=1"/);
   assert.doesNotMatch(CHALLENGE_HTML, /user-scalable|maximum-scale/);
 });

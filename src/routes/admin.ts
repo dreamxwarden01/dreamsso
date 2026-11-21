@@ -73,7 +73,7 @@ function htmlNonce(res: Response): string {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; style-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'self' 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
   );
   return nonce;
 }
@@ -154,7 +154,7 @@ adminRouter.get(['/admin', '/admin/clients', '/admin/clients/:id', '/admin/keys'
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'none'; script-src 'self'; font-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
     );
     res.sendFile(index);
   });

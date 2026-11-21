@@ -1,12 +1,7 @@
+import BrandMark from '../../account/client/src/components/BrandMark.jsx';
+
 // Inline stroke icons — same set/style as the account console (CSP stays 'self').
 const PATHS = {
-  shield: (
-    <>
-      <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
-      <rect x="9.5" y="11.5" width="5" height="4" rx="1" />
-      <path d="M10.5 11.5v-1a1.5 1.5 0 0 1 3 0v1" />
-    </>
-  ),
   appwindow: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />
@@ -43,6 +38,7 @@ const PATHS = {
 };
 
 export default function Icon({ name, size = 18, className, style }) {
+  if (name === 'shield') return <BrandMark size={size} className={className} style={style} />;
   return (
     <svg
       className={className}

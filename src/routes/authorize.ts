@@ -179,7 +179,7 @@ function htmlPage(res: Response, redirectUri?: string): string {
   // collect. Our own inline script is nonce-gated and makes no fetches.
   res.setHeader(
     'Content-Security-Policy',
-    `default-src 'none'; img-src 'self'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'self' 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`,
   );
   return nonce;
 }

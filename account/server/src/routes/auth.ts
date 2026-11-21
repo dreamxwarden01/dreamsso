@@ -1,3 +1,4 @@
+import { BRAND_HEAD } from '../branding.js';
 // OIDC relying-party auth routes for the account console BFF.
 //   GET  /auth/login    -> PKCE+state+nonce, 302 to the SSO /authorize
 //   GET  /auth/callback -> exchange code, verify id_token, open a server session
@@ -53,7 +54,7 @@ function esc(s: unknown): string {
 function renderAuthErrorPage(code?: string, detail?: string): string {
   return `<!DOCTYPE html><meta charset="utf-8"><title>Sign-in failed</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<body style="font-family:-apple-system,system-ui,sans-serif;max-width:520px;margin:12vh auto;padding:0 20px;color:#1f2937">
+${BRAND_HEAD}<body style="font-family:var(--font-ui,Geist,system-ui,sans-serif);max-width:520px;margin:12vh auto;padding:0 20px;color:#1f2937">
   <h1 style="font-size:20px;margin-bottom:4px">Couldn't sign you in</h1>
   <p style="color:#6b7280">Something went wrong while completing sign-in. You can try again.</p>
   <pre style="background:#f0f2f5;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;word-break:break-word;color:#9f2330;font-size:13px">${esc(code || 'unknown')}${detail ? '\n' + esc(detail) : ''}</pre>

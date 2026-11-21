@@ -1,3 +1,4 @@
+import { BRAND_HEAD, BRAND_MARK } from '../branding.js';
 // Server-rendered pages for the portal's pre-setup state. The BFF normally ships
 // only the SPA bundle, but before it's configured there's no SPA to serve — these
 // stand in, styled with the same tokens the SSO's server-rendered pages use so the
@@ -8,11 +9,7 @@ function esc(s: string): string {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
-// Brand mark — the shield-lock glyph shared with the SSO and the console's Icon.
-export const SHIELD = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-  <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
-  <rect x="9.5" y="11.5" width="5" height="4" rx="1" stroke="#fff" stroke-width="1.6"/>
-  <path d="M10.5 11.5v-1a1.5 1.5 0 0 1 3 0v1" stroke="#fff" stroke-width="1.6"/></svg>`;
+export const SHIELD = BRAND_MARK;
 
 // The same soft "bloom" backdrop as the SSO's auth pages. Served same-origin (so a
 // strict img-src 'self' CSP is satisfied) and drawn at natural size + centered, so
@@ -43,12 +40,14 @@ export const BG_URL = '/setup/bg.svg';
 // wizard exists.
 export function renderUnavailablePage(nonce: string): string {
   return `<!DOCTYPE html><html lang="en"><head>
+${BRAND_HEAD}
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Service unavailable</title>
 <style nonce="${nonce}">
+:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
   *{box-sizing:border-box}
   html,body{margin:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;
+  body{font-family:var(--font-ui);
     background:#f1f0f7;color:#1f2937;font-size:14px;line-height:1.5;min-height:100vh;
     display:flex;align-items:center;justify-content:center;padding:24px}
   .wrap{width:100%;max-width:400px}

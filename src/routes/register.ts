@@ -197,7 +197,7 @@ registerRouter.get('/welcome', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader(
       'Content-Security-Policy',
-      `default-src 'none'; style-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+      `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'self' 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
     );
     return res.status(400).send(renderErrorPage(nonce, {
       title: 'Link expired',
