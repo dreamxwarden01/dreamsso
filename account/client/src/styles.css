@@ -1,4 +1,4 @@
-:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
+:where(:root){--font-ui:'Inter','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
 /* DreamSSO account console — palette + components ported from docs/account-console-mockup.html
    (videosite's real tokens: #1a73e8 accent, #f0f2f5 bg, white cards, system font). */
 :root {

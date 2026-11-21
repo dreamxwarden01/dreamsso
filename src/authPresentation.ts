@@ -1,12 +1,12 @@
 // Shared by the server-rendered auth pages and the self-contained edge template.
 // Keep the background and transition geometry identical across those documents.
 export const AUTH_SHELL_CSS = `
-:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
+:where(:root){--font-ui:'Inter','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
   *{box-sizing:border-box}
   html,body{margin:0}
   html{background:#f1f0f7}
   @view-transition{navigation:auto}
-  body{font-family:var(--font-ui,Geist,system-ui,sans-serif);
+  body{font-family:var(--font-ui,Inter,system-ui,sans-serif);
     color:#1f2937;font-size:14px;line-height:1.5;min-height:100vh;min-height:100svh;
     display:flex;align-items:center;justify-content:center;padding:24px}
   .bg{position:fixed;inset:0;z-index:-1;pointer-events:none;background-color:#f1f0f7;

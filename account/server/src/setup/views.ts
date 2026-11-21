@@ -44,7 +44,7 @@ ${BRAND_HEAD}
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Service unavailable</title>
 <style nonce="${nonce}">
-:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
+:where(:root){--font-ui:'Inter','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
   *{box-sizing:border-box}
   html,body{margin:0}
   body{font-family:var(--font-ui);

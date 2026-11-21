@@ -1,0 +1,27 @@
+{
+  "Inter": {
+    "release": "v4.1",
+    "source": "https://raw.githubusercontent.com/rsms/inter/v4.1/docs/font-files/InterVariable.woff2",
+    "file": "inter-variable.woff2",
+    "sha256": "693b77d4f32ee9b8bfc995589b5fad5e99adf2832738661f5402f9978429a8e3",
+    "license": "OFL-Inter.txt",
+    "bytes": 352240,
+    "licenseSource": "https://raw.githubusercontent.com/rsms/inter/v4.1/LICENSE.txt",
+    "licenseBytes": 4380,
+    "licenseSha256": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"
+  },
+  "sharedFonts": {
+    "directory": "../v1/",
+    "families": [
+      "Geist Mono",
+      "Noto Sans SC Variable",
+      "Noto Sans TC Variable"
+    ],
+    "sources": "../v1/SOURCES.json",
+    "licenses": [
+      "../v1/OFL-Geist.txt",
+      "../v1/noto-sans-sc/LICENSE",
+      "../v1/noto-sans-tc/LICENSE"
+    ]
+  }
+}

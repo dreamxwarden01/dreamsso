@@ -1,8 +1,8 @@
-import { BRAND_DIR } from './branding.js';
+import { BRAND_DIR, FONT_DIR } from './branding.js';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-const edgeFont = (name: string) => readFileSync(path.join(BRAND_DIR, name)).toString('base64');
-const EDGE_FONTS = `@font-face{font-family:Geist;src:url(data:font/woff2;base64,${edgeFont('geist-sans.woff2')}) format('woff2');font-weight:100 900;font-display:swap}@font-face{font-family:'Geist Mono';src:url(data:font/woff2;base64,${edgeFont('geist-mono.woff2')}) format('woff2');font-weight:100 900;font-display:swap}:root{--font-ui:Geist,system-ui,sans-serif;--font-mono:'Geist Mono',ui-monospace,monospace}`;
+const edgeFont = (directory: string, name: string) => readFileSync(path.join(directory, name)).toString('base64');
+const EDGE_FONTS = `@font-face{font-family:Inter;src:url(data:font/woff2;base64,${edgeFont(FONT_DIR, 'inter-variable.woff2')}) format('woff2');font-weight:100 900;font-display:swap}@font-face{font-family:'Geist Mono';src:url(data:font/woff2;base64,${edgeFont(BRAND_DIR, 'geist-mono.woff2')}) format('woff2');font-weight:100 900;font-display:swap}:root{font-optical-sizing:auto;--font-ui:Inter,system-ui,sans-serif;--font-mono:'Geist Mono',ui-monospace,monospace}`;
 import { AUTH_SHELL_CSS, AUTH_BACKGROUND } from './authPresentation.js';
 
 // Self-contained Cloudflare Error Page, served at /challenge.html. Cloudflare

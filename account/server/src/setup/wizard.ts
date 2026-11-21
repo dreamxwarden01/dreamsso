@@ -12,7 +12,7 @@ ${BRAND_HEAD}
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>First-run setup · Account console</title>
 <style nonce="${nonce}">
-:where(:root){--font-ui:'Geist','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
+:where(:root){--font-ui:'Inter','Noto Sans SC Variable',system-ui,sans-serif;--font-mono:'Geist Mono','Noto Sans SC Variable',ui-monospace,monospace}
   *{box-sizing:border-box}
   :root{color-scheme:light}
   html,body{margin:0}
