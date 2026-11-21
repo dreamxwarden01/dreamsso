@@ -198,7 +198,7 @@ export default function RegisterStartPage() {
     }
   }
 
-  if (effectiveNotice) return <AuthCard docTitle="Create account"><RecipientNotice status={effectiveNotice} invitation={invitation}
+  if (effectiveNotice) return <AuthCard motionKey={effectiveNotice || phase} docTitle="Create account"><RecipientNotice status={effectiveNotice} invitation={invitation}
     signInHref={signInHref} /></AuthCard>;
   if (phase === 'sent') {
     const failed = mailState === 'failed';
@@ -207,7 +207,7 @@ export default function RegisterStartPage() {
     const intro = queued ? 'Your registration email is queued for sending to '
       : uncertain ? 'We could not confirm the request for '
         : failed ? 'The latest email could not be sent to ' : unknown ? 'The send result could not be confirmed for ' : 'The mail provider accepted a registration link for ';
-    return <AuthCard docTitle="Create account"><div className="auth-done recipient-notice info"><Icon name="mail" size={26} /></div>
+    return <AuthCard motionKey={'sent:' + title} docTitle="Create account"><div className="auth-done recipient-notice info"><Icon name="mail" size={26} /></div>
       <h1 className="auth-h1">{title}</h1><p className="auth-msg">{intro}<strong>{shownEmail}</strong>.</p>
       {invitation ? <p className="auth-msg">This invitation stays reserved for that address. The link works until {formatInvitationTime(invitation.expires_at)}; sending again does not extend its deadline.</p>
         : <p className="auth-msg">Open the link to choose your username and password. It expires in 30 minutes.</p>}
@@ -223,7 +223,7 @@ export default function RegisterStartPage() {
     </AuthCard>;
   }
 
-  return <AuthCard docTitle="Create account" title={invitation ? `Join ${siteName || 'DreamSSO'}` : 'Create your account'}
+  return <AuthCard motionKey={effectiveNotice || phase} docTitle="Create account" title={invitation ? `Join ${siteName || 'DreamSSO'}` : 'Create your account'}
     sub={invitation ? `${invitation.role?.name ? `You are invited as a ${invitation.role.name}.` : 'You are invited.'} ${boundEmail ? 'Send a registration link to your invited address.' : 'Enter your email to get a registration link.'}` : invitationRequired ? 'Enter your email address and invitation code to get started' : 'Enter your email address to get started'}
     cta={<>Already have an account? <a href={signInHref}>Sign in</a></>}>
     {invitation && <div className="auth-chip"><span>Invitation <code>{invitation.code}</code></span></div>}

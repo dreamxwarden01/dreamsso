@@ -150,7 +150,7 @@ export default function RegisterCompletePage() {
 
   if (phase === 'loading') {
     return (
-      <AuthCard docTitle="Create account">
+      <AuthCard motionKey={notice || phase} docTitle="Create account">
         <div className="auth-spinner" aria-hidden="true" />
         <p className="auth-wait">Checking your registration link…</p>
       </AuthCard>
@@ -159,14 +159,14 @@ export default function RegisterCompletePage() {
 
   const currentStatus = invitationStatus(registration?.invitation, now);
   const ended = !accountCreated && currentStatus && currentStatus !== 'unused' ? currentStatus : null;
-  if (phase === 'invalid' || ended) return <AuthCard docTitle="Create account">
+  if (phase === 'invalid' || ended) return <AuthCard motionKey={ended || notice || phase} docTitle="Create account">
     <RecipientNotice status={ended || notice || 'link'} invitation={registration?.invitation}
       onRetry={(ended || notice) === 'unreachable' ? () => setValidationAttempt((value) => value + 1) : undefined} />
   </AuthCard>;
 
   if (phase === 'redirect') {
     return (
-      <AuthCard docTitle="Create account">
+      <AuthCard motionKey={notice || phase} docTitle="Create account">
         <div className="auth-done"><Icon name="check" size={26} /></div>
         <h1 className="auth-h1">Account created</h1>
         <p className="auth-msg">Signing you in…</p>
@@ -176,7 +176,7 @@ export default function RegisterCompletePage() {
   }
 
   return (
-    <AuthCard
+    <AuthCard motionKey={notice || phase}
       docTitle="Create account"
       title="Choose your details"
       sub={registration?.invitation ? `${registration.invitation.role?.name ? `You are invited as a ${registration.invitation.role.name}.` : 'You are invited.'} Choose how you will sign in.` : 'Almost done — choose a username and password'}

@@ -69,7 +69,7 @@ export default function ForgotPage() {
 
   if (phase === 'sent') {
     return (
-      <AuthCard docTitle="Reset password">
+      <AuthCard motionKey={phase} docTitle="Reset password">
         <div className="auth-done">
           <Icon name="mail" size={26} />
         </div>
@@ -89,7 +89,7 @@ export default function ForgotPage() {
   }
 
   return (
-    <AuthCard
+    <AuthCard motionKey={phase}
       docTitle="Reset password"
       title="Reset your password"
       sub="Enter your username or email address and we'll send you a reset link"

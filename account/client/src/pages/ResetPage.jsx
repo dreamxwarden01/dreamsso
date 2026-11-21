@@ -191,9 +191,11 @@ export default function ResetPage() {
     }
   };
 
+  const motionKey = phase + ':' + (phase === 'challenge' ? method + (method === 'passkey' ? ':' + busy : '') : '');
+
   if (phase === 'loading') {
     return (
-      <AuthCard docTitle="Reset password">
+      <AuthCard motionKey={motionKey} docTitle="Reset password">
         <div className="auth-spinner" aria-hidden="true" />
         <p className="auth-wait">Checking your reset link…</p>
       </AuthCard>
@@ -202,7 +204,7 @@ export default function ResetPage() {
 
   if (phase === 'invalid') {
     return (
-      <AuthCard docTitle="Reset password" title="Link expired">
+      <AuthCard motionKey={motionKey} docTitle="Reset password" title="Link expired">
         <p className="auth-msg">{invalidMsg} Request a new one and try again.</p>
         <a
           className="auth-btn"
@@ -217,7 +219,7 @@ export default function ResetPage() {
 
   if (phase === 'redirect') {
     return (
-      <AuthCard docTitle="Reset password">
+      <AuthCard motionKey={motionKey} docTitle="Reset password">
         <div className="auth-done">
           <Icon name="check" size={26} />
         </div>
@@ -247,7 +249,7 @@ export default function ResetPage() {
     );
 
     return (
-      <AuthCard docTitle="Reset password" title="Verify it’s you">
+      <AuthCard motionKey={motionKey} docTitle="Reset password" title="Verify it’s you">
         <div className="auth-chip"><span>{challenge.label}</span></div>
         {chErr && <div className="auth-err">{chErr.msg} [{chErr.code}]</div>}
         {method === 'passkey' ? (
@@ -281,7 +283,7 @@ export default function ResetPage() {
   }
 
   return (
-    <AuthCard docTitle="Reset password" title="Choose a new password" sub="for your account">
+    <AuthCard motionKey={motionKey} docTitle="Reset password" title="Choose a new password" sub="for your account">
       {srvErr && <div className="auth-err">{srvErr}</div>}
       <form onSubmit={submitPassword} noValidate>
         <div className={'auth-grp' + (pwBad ? ' bad' : '')}>

@@ -278,6 +278,10 @@ img.pmenu-av { object-fit: cover; display: block; }
   background: #f1f0f7 url(/auth-bg.svg) center / auto no-repeat fixed; }
 .auth-wrap { width: 100%; max-width: 400px; }
 .auth-card { background: #fff; border: 1px solid var(--bd); border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04); padding: 36px 34px; }
+.auth-card.auth-card-motion { position: relative; isolation: isolate; border-color: transparent; background: none; box-shadow: none; padding: 0; }
+.auth-card-surface { position: absolute; inset: -1px; z-index: -1; pointer-events: none; background: #fff; border: 1px solid var(--bd); border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04); transform-origin: 0 0; }
+.auth-card-content { padding: 36px 34px; }
+.auth-card-content, .auth-cta, .auth-foot { transform-origin: 0 0; }
 .auth-brand { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 20px; }
 .auth-badge { width: 42px; height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #1a73e8, #1557b0); box-shadow: 0 2px 8px rgba(26,115,232,.35); flex-shrink: 0; color: #fff; }
 .auth-wordmark { font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
