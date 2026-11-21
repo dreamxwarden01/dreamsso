@@ -12,6 +12,7 @@ function callbackFixture(claims: Record<string, unknown>, options: { ttl?: numbe
   const created: { data: any; ttl: number; sid: string }[] = [];
   const dependencies: Record<string, unknown> = {
     express: { Router: () => ({ get: (path: string, handler: Function) => routes.set(path, handler) }) },
+    '../branding.js': { BRAND_HEAD: '' }, // Presentation-only import; callback assertions remain isolated.
     '../config.js': { config: { sessionTtl: options.ttl ?? 86400 } },
     '../oidc.js': {
       exchangeCode: async () => ({ id_token: 'synthetic-id', access_token: 'synthetic-access', expires_in: 900 }),
