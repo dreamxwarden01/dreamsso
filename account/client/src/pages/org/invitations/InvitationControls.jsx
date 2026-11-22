@@ -117,16 +117,16 @@ export function InvitationPicker({ label, value, options, onChange, id, block = 
 }
 
 export const InvitationModal = forwardRef(function InvitationModal({ labelId, busy = false, create = false, initialFocus, onClose, children }, ref) {
-  const overlay = useRef(null), dialog = useRef(null), opener = useRef(document.activeElement), busyRef = useRef(busy), callback = useRef(onClose), timer = useRef(null), leaving = useRef(false), down = useRef(false);
+  const overlay = useRef(null), dialog = useRef(null), opener = useRef(document.activeElement), busyRef = useRef(busy), callback = useRef(onClose), timer = useRef(null), leaving = useRef(false);
   busyRef.current = busy; callback.current = onClose;
-  const close = useCallback((force = false) => {
-    if (leaving.current || busyRef.current && !force) return;
+  const close = useCallback(() => {
+    if (leaving.current || busyRef.current) return;
     leaving.current = true; const ms = duration(140);
     overlay.current?.animate?.([{ opacity: 1 }, { opacity: 0 }], { duration: ms, fill: 'forwards' });
     dialog.current?.animate?.([{ transform: 'none' }, { transform: 'scale(.98)' }], { duration: ms, fill: 'forwards' });
     timer.current = setTimeout(() => callback.current(), ms);
   }, []);
-  useImperativeHandle(ref, () => ({ close: () => close(true) }), [close]);
+  useImperativeHandle(ref, () => ({ close }), [close]);
   useLayoutEffect(() => {
     const previousOverflow = document.body.style.overflow, page = document.querySelector('.iv-page');
     const oldInert = page?.inert; if (page) page.inert = true; document.body.style.overflow = 'hidden';
@@ -137,10 +137,10 @@ export const InvitationModal = forwardRef(function InvitationModal({ labelId, bu
     const key = (e) => {
       // Existing organization step-up overlays retain priority and own Escape.
       if (document.querySelector('.ch-scrim')) return;
-      if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+      // Dismissal belongs to explicit Cancel/Done buttons. Picker Escape stays local.
       if (e.key !== 'Tab') return;
       const nodes = focusables(), first = nodes[0], last = nodes.at(-1); if (!first) { e.preventDefault(); return; }
-      if (!dialog.current.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+      if (!nodes.includes(document.activeElement)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
       else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     };
@@ -148,8 +148,7 @@ export const InvitationModal = forwardRef(function InvitationModal({ labelId, bu
     return () => { clearTimeout(timer.current); document.removeEventListener('keydown', key); document.body.style.overflow = previousOverflow; if (page) page.inert = oldInert;
       const target = opener.current?.isConnected ? opener.current : document.querySelector('.iv-seg [aria-pressed=true]') || document.querySelector('.iv-new-btn'); target?.focus({ preventScroll: true }); };
   }, [close]);
-  return createPortal(<div ref={overlay} className="iv-ui iv-modal-overlay" onPointerDown={(e) => { down.current = e.target === e.currentTarget; }}
-    onClick={(e) => { if (e.target === e.currentTarget && down.current) close(); }}>
+  return createPortal(<div ref={overlay} className="iv-ui iv-modal-overlay">
     <div ref={dialog} className={'iv-modal' + (create ? ' iv-modal-create' : '')} role="dialog" aria-modal="true" aria-labelledby={labelId}>{children}</div>
   </div>, document.body);
 });

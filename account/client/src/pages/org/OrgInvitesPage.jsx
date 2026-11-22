@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext.jsx';
-import { toast } from '../../components/Toast.jsx';
 import InvitationIcon from './invitations/InvitationIcon.jsx';
 import { InvitationPager, InvitationPicker, InvitationTimeProvider, useInvitationTime } from './invitations/InvitationControls.jsx';
 import InvitationRow from './invitations/InvitationRow.jsx';
@@ -107,6 +106,6 @@ function InvitationsWorkspace({ actor, canCreate }) {
     </div>
     <InvitationPager position="bottom" data={committed} wantedPage={model.query.page} onPage={page}/>
     {creating && <CreateInvitationDialog actor={actor} initialForm={initialDraft.current} onClose={() => { initialDraft.current = null; setCreating(false); }} onCreate={(body) => mutate('create', null, body)}/>}
-    {revoking && <RevokeInvitationDialog invite={revoking} onClose={() => setRevoking(null)} onRevoke={async (invite) => { const result = await mutate('revoke', invite); toast.success('Invitation revoked. Its record is kept.'); return result; }}/>}
+    {revoking && <RevokeInvitationDialog invite={revoking} onClose={() => setRevoking(null)} onRevoke={(invite) => mutate('revoke', invite)}/>}
   </section>;
 }

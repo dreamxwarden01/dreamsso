@@ -57,7 +57,9 @@ export function CreateInvitationDialog({ actor, initialForm, onClose, onCreate }
       const invite = await onCreate({ ...form, email, note: form.note.trim() });
       try { clearInvitationDraft(sessionStorage, actor); } catch { /* request receipt remains authoritative */ }
       if (!mounted.current) return;
-      feedback.finish('done', () => { if (mounted.current) { locked.current = false; setBusy(false); setResult(invite); } });
+      // The result is the success feedback; do not hold the form on a checkmark.
+      if (view.current) previousHeight.current = view.current.getBoundingClientRect().height;
+      feedback.reset(); setBusy(false); setResult(invite);
     } catch (e) {
       if (!mounted.current) return;
       locked.current = false; setBusy(false); feedback.finish('fail');
@@ -80,7 +82,7 @@ export function CreateInvitationDialog({ actor, initialForm, onClose, onCreate }
           <div className="iv-kv-row"><dt>Record ID</dt><dd><code>{result.id}</code><CopyInvitationButton label="Copy ID" text={result.id} className="iv-btn-xs"/></dd></div></dl>
         {pollError && <p className="iv-fhint iv-bad" role="alert">Couldn’t refresh the email status. Check Details before sending again.</p>}
       </div>
-      <div className="iv-cp-foot"><p className="iv-cp-status"/><div className="iv-cp-btns"><button type="button" className="iv-btn" onClick={() => { feedback.reset(); setResult(null); set({ email: '', note: '' }); }}>Create another</button><button type="button" className={'iv-btn' + (result.delivery === 'email' ? ' iv-btn-primary' : '')} onClick={() => modal.current.close()}>Done</button></div></div>
+      <div className="iv-cp-foot"><p className="iv-cp-status"/><div className="iv-cp-btns"><button type="button" className="iv-btn" onClick={() => { if (view.current) previousHeight.current = view.current.getBoundingClientRect().height; locked.current = false; feedback.reset(); setResult(null); set({ email: '', note: '' }); }}>Create another</button><button type="button" className={'iv-btn' + (result.delivery === 'email' ? ' iv-btn-primary' : '')} onClick={() => modal.current.close()}>Done</button></div></div>
     </div> : <form className="iv-cp-view" noValidate onSubmit={submit}>
       <div className="iv-cp-head"><h2 className="iv-cp-title" id={id + '-title'}>New invitation</h2><p className="iv-cp-sub">Each invitation creates one account.</p></div>
       <fieldset className="iv-cp-fields" disabled={busy}>
@@ -102,16 +104,33 @@ export function CreateInvitationDialog({ actor, initialForm, onClose, onCreate }
 }
 
 export function RevokeInvitationDialog({ invite, onClose, onRevoke }) {
-  const id = useId(), modal = useRef(null), cancel = useRef(null), feedback = useInvitationFeedback(), [busy, setBusy] = useState(false), [error, setError] = useState(null), [terminal, setTerminal] = useState(false), lock = useRef(false);
+  const id = useId(), modal = useRef(null), cancel = useRef(null), title = useRef(null), mounted = useRef(true);
+  const feedback = useInvitationFeedback(), [busy, setBusy] = useState(false), [error, setError] = useState(null), [terminal, setTerminal] = useState(false), [revoked, setRevoked] = useState(false), lock = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useLayoutEffect(() => { if (revoked) title.current?.focus({ preventScroll: true }); }, [revoked]);
   const revoke = async () => {
     if (lock.current || terminal || !feedback.begin()) return; lock.current = true; setBusy(true); setError(null);
-    try { await onRevoke(invite); setBusy(false); modal.current?.close(); }
-    catch (e) { lock.current = false; setBusy(false); feedback.finish('fail'); setError(invitationError(e)); if (['already_used', 'invitation_gone', 'invitation_used', 'invitation_expired', 'invitation_revoked'].includes(e.code)) setTerminal(true); }
+    try {
+      await onRevoke(invite);
+      if (!mounted.current) return;
+      feedback.reset(); setBusy(false); setRevoked(true);
+    } catch (e) {
+      if (!mounted.current) return;
+      lock.current = false; setBusy(false); feedback.finish('fail'); setError(invitationError(e));
+      if (['already_used', 'invitation_gone', 'invitation_used', 'invitation_expired', 'invitation_revoked'].includes(e.code)) setTerminal(true);
+    }
   };
   return <InvitationModal ref={modal} labelId={id} busy={busy} initialFocus={cancel} onClose={onClose}>
-    <h2 className="iv-modal-title" id={id}>Revoke this invitation?</h2>
-    <p className="iv-modal-msg"><code>{invite.code}</code> ({invite.note || invite.email || 'Shareable link'}) stops working immediately. Anyone partway through registering with it can’t finish. Accounts that already exist aren’t affected.</p>
-    {error && <p className="iv-modal-err" role="alert">{error}</p>}
-    <div className="iv-modal-actions"><InvitationButton label="Revoke" phase={feedback.phase} busyLabel="Revoking…" doneLabel="Revoked" failLabel="Try again" iconOnly className="iv-btn-danger iv-revoke-confirm" disabled={terminal} onClick={revoke}/><button ref={cancel} type="button" className="iv-btn" disabled={busy} onClick={() => modal.current.close()}>Cancel</button></div>
+    {revoked ? <>
+      <div className="iv-res-ic"><InvitationIcon name="tick"/></div>
+      <h2 ref={title} className="iv-modal-title" id={id} tabIndex={-1}>Invitation revoked</h2>
+      <p className="iv-modal-msg"><code>{invite.code}</code> can no longer be used. Its record is kept in history.</p>
+      <div className="iv-modal-actions"><button type="button" className="iv-btn iv-btn-primary" onClick={() => modal.current.close()}>Done</button></div>
+    </> : <>
+      <h2 className="iv-modal-title" id={id}>Revoke this invitation?</h2>
+      <p className="iv-modal-msg"><code>{invite.code}</code> ({invite.note || invite.email || 'Shareable link'}) stops working immediately. Anyone partway through registering with it can’t finish. Accounts that already exist aren’t affected.</p>
+      {error && <p className="iv-modal-err" role="alert">{error}</p>}
+      <div className="iv-modal-actions"><InvitationButton label="Revoke" phase={feedback.phase} busyLabel="Revoking…" doneLabel="Revoked" failLabel="Try again" iconOnly className="iv-btn-danger iv-revoke-confirm" disabled={terminal} onClick={revoke}/><button ref={cancel} type="button" className="iv-btn" disabled={busy} onClick={() => modal.current.close()}>Cancel</button></div>
+    </>}
   </InvitationModal>;
 }
