@@ -176,9 +176,8 @@ export const usernameChangeCheck = (newUsername) =>
 export const verifyEmail = (token) => reqPublic('/api/verify-email', { token });
 
 // --- registration (public, invitation-gated upstream) ---
-export const registerInvitation = (code) => reqPublic('/api/register/invitation', {code});
 export const registerStart = (email, code, turnstileToken, requestId) =>
-  reqPublic('/api/register/start', { email, code: code || undefined, request_id: requestId, turnstile_token: turnstileToken ?? undefined }, { timeoutMs: SUBMIT_TIMEOUT_MS });
+  reqPublic('/api/register/start', { email, code: code || undefined, request_id: requestId, turnstile_token: turnstileToken ?? undefined }, { timeoutMs: 20000 });
 export const registerValidate = (email, token) => reqPublic('/api/register/validate', { email, token });
 export const registerCheckUsername = (email, token, username) =>
   reqPublic('/api/register/check-username', { email, token, username });

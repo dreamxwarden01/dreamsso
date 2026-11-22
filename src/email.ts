@@ -40,6 +40,10 @@ export async function sendEmail(args: SendEmailArgs): Promise<SendResult> {
     return { ok: false, reason: 'unreachable' };
   }
 
+  if(r.status===401||r.status===403){
+    await r.body?.cancel().catch(()=>{});
+    return {ok:false,reason:'email_not_configured'};
+  }
   let decoded: unknown;
   try { decoded = await r.json(); } catch { return {ok:false,reason:'unknown'}; }
   if(r.status >= 500 || r.status===408 || r.status===429) return {ok:false,reason:'unknown'};

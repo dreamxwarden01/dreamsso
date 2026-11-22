@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type pg from 'pg';
+import { ActiveTasks } from './lifecycle.js';
 import { pool } from './db.js';
 import { sealSecret, openSecret } from './secretbox.js';
 import { reserveRegistrationSend } from './registration.js';
@@ -12,23 +13,23 @@ import { lockInvitation, validateLockedInvitation, InvitationError } from './inv
 
 export const invitationProofHash = (token: string): Buffer => crypto.createHash('sha256').update(token).digest();
 export interface MailInvitation { id: string; code: string; bound_email: string | null; expires_at: Date | string }
-export interface QueueResult { queued: boolean; retry_after?: number; error?: string }
+export interface QueueResult { queued: boolean; jobId?: string; jobState?: string; retry_after?: number; error?: string }
 
 /** Caller owns role lock and invite row lock; binding and private intent commit together. */
 export async function queueInvitationMail(db: pg.PoolClient, invite: MailInvitation,
   request: { actorSub: string | null; requestId: string; requireQueued?: boolean }): Promise<QueueResult> {
   if (!invite.bound_email) throw Error('Invitation email must be bound before queueing.');
   const actor = request.actorSub ?? 'public:' + invite.id;
-  const prior = (await db.query(`SELECT r.invitation_id,r.email,j.state FROM invitation_mail_requests r
+  const prior = (await db.query(`SELECT r.invitation_id,r.email,j.id AS job_id,j.state FROM invitation_mail_requests r
     JOIN invitation_mail_jobs j ON j.id=r.job_id WHERE r.actor_key=$1 AND r.request_id=$2`, [actor,request.requestId])).rows[0];
   if (prior) {
     if (prior.invitation_id!==invite.id || prior.email.toLowerCase()!==invite.bound_email.toLowerCase()) throw new InvitationError(409,'request_conflict');
-    return {queued:['queued','sending'].includes(prior.state)};
+    return {queued:['queued','sending'].includes(prior.state),jobId:prior.job_id,jobState:prior.state};
   }
   const pending = (await db.query("SELECT id,state FROM invitation_mail_jobs WHERE invitation_id=$1 AND state IN('queued','sending') LIMIT 1", [invite.id])).rows[0];
   if (pending) {
     await db.query('INSERT INTO invitation_mail_requests(actor_key,request_id,invitation_id,email,job_id) VALUES($1,$2,$3,$4,$5)', [actor,request.requestId,invite.id,invite.bound_email,pending.id]);
-    return {queued:true};
+    return {queued:true,jobId:pending.id,jobState:pending.state};
   }
   const cooldown = (await db.query(`SELECT GREATEST(0,ceil(extract(epoch from(mail_next_retry_at-clock_timestamp()))))::int AS seconds
     FROM invitation_codes WHERE id=$1`, [invite.id])).rows[0]?.seconds ?? 0;
@@ -49,7 +50,7 @@ export async function queueInvitationMail(db: pg.PoolClient, invite: MailInvitat
   await db.query('INSERT INTO invitation_mail_requests(actor_key,request_id,invitation_id,email,job_id) VALUES($1,$2,$3,$4,$5)', [actor,request.requestId,invite.id,invite.bound_email,inserted.rows[0].id]);
   await db.query(`UPDATE invitation_codes SET mail_state='queued',mail_attempts=mail_attempts+1,mail_last_at=clock_timestamp(),
     mail_error_code=NULL,mail_next_retry_at=clock_timestamp()+make_interval(secs=>$2) WHERE id=$1`, [invite.id,Math.max(60,slot.nextBackoff)]);
-  return { queued: true, retry_after: Math.max(60,slot.nextBackoff) };
+  return { queued: true, jobId:inserted.rows[0].id, jobState:'queued', retry_after: Math.max(60,slot.nextBackoff) };
 }
 
 export async function readInvitationProof(db: pg.Pool | pg.PoolClient, email: string, token: string, includeExpired = false) {
@@ -61,17 +62,18 @@ export async function readInvitationProof(db: pg.Pool | pg.PoolClient, email: st
 }
 
 /** Ambiguous provider outcomes are never retried automatically. A new explicit resend is required. */
-export async function drainInvitationMail(options: { database?: pg.Pool; send?: typeof sendEmail } = {}): Promise<void> {
+async function performInvitationMail(options: MailOptions, jobId: string | null): Promise<void> {
   const database = options.database ?? pool, deliver = options.send ?? sendEmail;
   const db = await database.connect();let job: any = null;
   try {
-    await db.query('BEGIN');await lockRoleWrites(db);
+    await db.query('BEGIN');await lockRoleWrites(db);await db.query("SET LOCAL lock_timeout='3s'");
     const abandoned = (await db.query(`UPDATE invitation_mail_jobs SET state='unknown',error_code='delivery_unknown',payload_enc=NULL,
       finished_at=clock_timestamp(),lease_id=NULL,lease_until=NULL WHERE state='sending' AND lease_until<clock_timestamp()
       RETURNING invitation_id,id`)).rows;
     for (const old of abandoned) await db.query(`UPDATE invitation_codes SET mail_state='unknown',mail_error_code='delivery_unknown',mail_last_at=clock_timestamp()
       WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM invitation_mail_jobs WHERE invitation_id=$1 AND (created_at,id)>(SELECT created_at,id FROM invitation_mail_jobs WHERE id=$2))`, [old.invitation_id,old.id]);
-    job = (await db.query(`SELECT * FROM invitation_mail_jobs WHERE state='queued' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`)).rows[0];
+    job = (await db.query(`SELECT * FROM invitation_mail_jobs WHERE state='queued' AND ($1::uuid IS NULL OR id=$1)
+      ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[jobId])).rows[0];
     if (job) {
       const invite = await lockInvitation(db,job.invitation_id);
       try {
@@ -102,7 +104,7 @@ export async function drainInvitationMail(options: { database?: pg.Pool; send?: 
     result = await deliver({ to:job.email,...renderRegistrationEmail({siteName:site!,link,expiresAt:new Date(job.expires_at).toISOString()}) });
   } catch { result = {ok:false,reason:'unreachable'}; }
   const state = result.ok ? 'sent' : ['unreachable','unknown'].includes(result.reason) ? 'unknown' : 'failed';
-  const code = result.ok ? null : state === 'unknown' ? 'delivery_unknown' : result.reason === 'not_configured' ? 'email_not_configured' : 'send_failed';
+  const code = result.ok ? null : state === 'unknown' ? 'delivery_unknown' : ['not_configured','email_not_configured'].includes(result.reason) ? 'email_not_configured' : ['bounced','rejected'].includes(result.reason)?result.reason:'send_failed';
   const finish = await database.connect();
   try {
     await finish.query('BEGIN');
@@ -113,4 +115,56 @@ export async function drainInvitationMail(options: { database?: pg.Pool; send?: 
     await finish.query('COMMIT');
   } catch(error) { await finish.query('ROLLBACK').catch(()=>{});throw error; }
   finally { finish.release(); }
+}
+
+
+interface MailOptions { database?: pg.Pool; send?: typeof sendEmail }
+export interface InvitationMailJob { state: string; error_code: string | null; finished_at: Date | null; created_at: Date }
+const activeMail = new ActiveTasks();
+let stopping = false;
+let lane: Promise<void> = Promise.resolve();
+const targeted = new Map<string, Promise<void>>();
+
+export const trackInvitationMailWork = <T>(work: Promise<T>): Promise<T> => activeMail.track(work);
+export function stopInvitationMail(): void { stopping = true; }
+export async function settleInvitationMail(): Promise<void> { await activeMail.settle(); }
+
+// One provider operation per process, shared by HTTP sends and the existing
+// worker. Row locks and fenced leases still prevent cross-process duplicates.
+function scheduleMail(jobId: string | null, options: MailOptions, deadline = Infinity): Promise<void> {
+  const old = jobId ? targeted.get(jobId) : null;
+  if (old) return old;
+  const run = lane.then(async () => {
+    if (!stopping && Date.now() < deadline) await performInvitationMail(options,jobId);
+  });
+  lane = run.catch(() => {});
+  activeMail.track(run);
+  if (jobId) {
+    targeted.set(jobId,run);
+    const clear = () => { if (targeted.get(jobId) === run) targeted.delete(jobId); };
+    void run.then(clear,clear);
+  }
+  return run;
+}
+export async function drainInvitationMail(options: MailOptions = {}): Promise<void> { await scheduleMail(null,options); }
+
+/** A timed-out HTTP caller never cancels delivery or invents its outcome. */
+export async function dispatchInvitationMailJob(jobId: string, options: MailOptions & {deadline: number}): Promise<InvitationMailJob | null> {
+  const database = options.database ?? pool;
+  void scheduleMail(jobId,options,options.deadline).catch(() => {});
+  let done = false;
+  const wait = activeMail.track((async () => {
+    while (!done) {
+      let row: InvitationMailJob | undefined;
+      try { row = (await database.query<InvitationMailJob>('SELECT state,error_code,finished_at,created_at FROM invitation_mail_jobs WHERE id=$1',[jobId])).rows[0]; }
+      catch { return null; }
+      if (!row || !['queued','sending'].includes(row.state)) return row ?? null;
+      await new Promise(resolve => setTimeout(resolve,Math.min(100,Math.max(0,options.deadline-Date.now()))));
+    }
+    return null;
+  })());
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<null>(resolve => { timer = setTimeout(() => { done = true; resolve(null); },Math.max(0,options.deadline-Date.now())); });
+  try { return await Promise.race([wait,timeout]); }
+  finally { done = true; clearTimeout(timer!); }
 }

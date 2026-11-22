@@ -34,7 +34,7 @@ import { resolveSetupState, isSetupComplete } from './setup/state.js';
 import { ensureSetupToken, SETUP_TOKEN_FILE } from './setup/token.js';
 import { startEventPump,stopEventPump,settleEventPump } from './events.js';
 import { sweepInvitations } from './registration.js';
-import { drainInvitationMail } from './invitationMail.js';
+import { drainInvitationMail, stopInvitationMail, settleInvitationMail } from './invitationMail.js';
 import { withRoleTransaction } from './rbac/roleChanges.js';
 import { pool } from './db.js';
 import { redis } from './redis.js';
@@ -45,8 +45,8 @@ import crypto from 'node:crypto';
 import { render404Page } from './views.js';
 
 const lifecycle=new ServiceLifecycle({
- quiesce:stopEventPump,
- drain:settleEventPump,
+ quiesce:()=>{stopEventPump();stopInvitationMail();},
+ drain:async()=>{await Promise.all([settleEventPump(),settleInvitationMail()]);},
  close:async()=>{const results=await Promise.allSettled([closeS2SFetch(),pool.end(),redis.quit()]);if(results.some(result=>result.status==='rejected'))throw Error('Client cleanup failed.');},
  force:()=>{redis.disconnect();destroyS2SFetch();},
  exit:code=>process.exit(code),report:code=>console.warn('DreamSSO lifecycle: '+code),

@@ -25,3 +25,8 @@ test('ambiguous HTTP and unreadable bodies never claim definite failure',async()
  assert.equal((await mailer(async()=>({json:async()=>{throw new DOMException('timed out','TimeoutError');},status:200,ok:true}) as Response)(args)).reason,'unknown');
  assert.equal((await mailer(async()=>{throw Error('synthetic connection failure');})(args)).reason,'unreachable');
 });
+test('configuration authorization failures and definite recipient bounce remain distinguishable',async()=>{
+ for(const status of [401,403])assert.equal((await mailer(async()=>new Response('not json',{status}))(args)).reason,'email_not_configured');
+ assert.equal((await mailer(async()=>Response.json({success:true,result:{permanent_bounces:['recipient@example.invalid']}}))(args)).reason,'bounced');
+ assert.equal((await mailer(async()=>Response.json({success:false},{status:422}))(args)).reason,'rejected');
+});

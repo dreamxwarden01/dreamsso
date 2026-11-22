@@ -122,7 +122,7 @@ export async function enforceTurnstileGate(req: Request, res: Response): Promise
   return true;
 }
 
-export async function s2sPost(path: string, body: Record<string, unknown>): Promise<globalThis.Response> {
+export async function s2sPost(path: string, body: Record<string, unknown>, options: {timeoutMs?: number} = {}): Promise<globalThis.Response> {
   const assertion = await s2sAssertion(path);
   return s2sFetch(config.internal + path, {
     method: 'POST',
@@ -132,7 +132,7 @@ export async function s2sPost(path: string, body: Record<string, unknown>): Prom
       client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
       client_assertion: assertion,
     }),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
   });
 }
 

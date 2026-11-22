@@ -9,13 +9,16 @@ const declaration=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node
 assert.ok(declaration);
 const code=ts.transpileModule(declaration.getText(ast)+'\nglobalThis.project=publicInvitation;',{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 const context:any={Date};vm.runInNewContext(code,context);
-test('public preview exposes the recipient contract but not administrator notes or private material',()=>{
+test('invitation projection is recipient-free unless explicitly used after recipient verification',()=>{
  const row={code:'ABCD1234EFGH',note:'Private administration note',created_by:'private-actor-id',payload_enc:'private-mail-proof',proof_hash:'private-hash',
   expires_at:new Date(Date.now()+3600000).toISOString(),created_at:new Date().toISOString(),bound_email:'recipient@example.invalid',
   bound_at:new Date().toISOString(),invited_role_slug:'member',invited_role_label:'Member',mail_state:'sent',mail_last_at:null,mail_error_code:null};
  const result=context.project(row),json=JSON.stringify(result);
- assert.equal(result.label,'Invitation');assert.equal(result.bound_email,row.bound_email);assert.equal(result.status,'unused');
- for(const forbidden of ['Private administration note','private-actor-id','private-mail-proof','private-hash'])assert.ok(!json.includes(forbidden));
+ assert.equal(result.label,'Invitation');assert.equal(result.bound_email,undefined);assert.equal(result.status,'unused');
+ assert.equal(result.bound_at,undefined);assert.equal(result.mail,undefined);
+ for(const forbidden of ['Private administration note','private-actor-id','private-mail-proof','private-hash',row.bound_email])assert.ok(!json.includes(forbidden));
+ const recipient=context.project(row,true);
+ assert.equal(recipient.bound_email,row.bound_email);assert.equal(recipient.mail.state,'sent');
 });
 test('terminal states are explicit and completed invitations stay used',()=>{
  const base={expires_at:new Date(Date.now()-1000).toISOString()};

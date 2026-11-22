@@ -74,9 +74,9 @@ export function LockedEmail({ email, hint = 'This invitation is for this address
   </div>;
 }
 
-export function RecipientNotice({ status, invitation, signInHref = '/', onRetry }) {
+export function RecipientNotice({ status, invitation, expiresAt, signInHref = '/', onRetry }) {
   const messages = {
-    expired: ['This invitation has expired', `Its deadline was ${formatInvitationTime(invitation?.expires_at)}. Invitations cannot be extended or completed late.`],
+    expired: ['This invitation has expired', `Its deadline was ${formatInvitationTime(invitation?.expires_at || expiresAt)}. Invitations cannot be extended or completed late.`],
     used: ['This invitation has already been used', 'Each invitation creates one account. If that was you, sign in instead.'],
     revoked: ['This invitation was withdrawn', 'It can no longer be used to create an account.'],
     unavailable: ['This invitation is no longer available', 'The access it offered has changed, so it cannot be used.'],

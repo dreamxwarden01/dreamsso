@@ -56,3 +56,10 @@ export function registrationRequestId(code, email, renew = false) {
   try { sessionStorage.setItem(key, id); } catch { /* in-memory caller still retains it */ }
   return id;
 }
+
+// A definitive failed receipt is safe to retire locally. The server keeps its
+// history; a later deliberate attempt after configuration repair needs a new ID.
+export function retireRegistrationRequest(code, email, requestId) {
+  const key = 'registration-request:' + code + ':' + email.toLowerCase();
+  try { if (sessionStorage.getItem(key) === requestId) sessionStorage.removeItem(key); } catch { /* private storage may be unavailable */ }
+}

@@ -5,6 +5,7 @@ import {readFile} from 'node:fs/promises';
 import pg from 'pg';
 import {SignJWT,generateKeyPair,exportJWK} from 'jose';
 import type {Router} from 'express';
+import {createServer} from 'node:http';
 
 test('invitation mail and account creation share durable single-use state',async t=>{
  const source=process.env.DREAMSSO_ROLE_SYNC_TEST_DATABASE_URL;
@@ -27,10 +28,10 @@ test('invitation mail and account creation share durable single-use state',async
  const {pool}=await import('../src/db.js'),{redis}=await import('../src/redis.js');
  const {createInvitation,lockInvitation,validateLockedInvitation,revokeInvitation,readInvitationPreview}=await import('../src/invitations.js');
  const {withRoleTransaction}=await import('../src/rbac/roleChanges.js');
- const {queueInvitationMail,drainInvitationMail,readInvitationProof,invitationProofHash}=await import('../src/invitationMail.js');
+ const {queueInvitationMail,drainInvitationMail,dispatchInvitationMailJob,settleInvitationMail,readInvitationProof,invitationProofHash}=await import('../src/invitationMail.js');
  const {commitRegistration}=await import('../src/registrationStore.js');
  const {registerRouter}=await import('../src/routes/register.js');
- const {setSetting}=await import('../src/settings.js');
+ const {setSetting,setSecretSetting}=await import('../src/settings.js');
  const {orgRouter}=await import('../src/routes/org.js');
  // Execute the actual Express route's complete middleware stack. Only the HTTP
  // transport is replaced: auth, signed operation checks, SQL and Redis are real.
@@ -74,6 +75,19 @@ test('invitation mail and account creation share durable single-use state',async
  });
  const delivered=new Map<string,string>();let sends=0;
  const send=async(args:{to:string;text:string})=>{sends++;const match=/https?:\/\/[^\s]+/.exec(args.text);assert.ok(match);delivered.set(args.to,new URL(match[0]).searchParams.get('token')!);return {ok:true as const};};
+ let providerCalls=0;let providerHold:(()=>Promise<void>)|null=null;
+ let providerReply: {status:number;body:unknown}|null=null;
+ const provider=createServer(async(req,res)=>{
+  try{
+   providerCalls++;if(providerHold)await providerHold();
+   let body='';for await(const chunk of req){body+=chunk;if(body.length>65536)throw Error('oversized fixture');}
+   const data=JSON.parse(body);
+   if(providerReply){res.writeHead(providerReply.status,{'Content-Type':'application/json'}).end(JSON.stringify(providerReply.body));return;}
+   await send(data);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({success:true}));
+  }catch{res.writeHead(500).end();}
+ });
+ await new Promise<void>(resolve=>provider.listen(0,'127.0.0.1',resolve));
+ const providerPort=(provider.address() as {port:number}).port;
  const finish=async(inv:any,token:string,username='user_'+randomUUID().slice(0,8),requestHash=randomBytes(32))=>tx(db=>commitRegistration(db,{
   sub:randomUUID(),username,displayName:'Fixture',email:inv.bound_email,passwordHash:'synthetic-argon-hash',proofHash:invitationProofHash(token),requestHash,
   code:inv.code,proofExpiresAt:new Date(inv.expires_at),modernProof:true}));
@@ -88,6 +102,146 @@ test('invitation mail and account creation share durable single-use state',async
   await pool.query("INSERT INTO signing_keys(kid,public_jwk,private_key_enc,status) VALUES($1,$2,$3,'current')",[tokenJwk.kid,tokenJwk,Buffer.from('synthetic-unused-private-key')]);
   await pool.query("INSERT INTO sessions(sid,user_sub,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '1 day')",[sid,actor,randomBytes(32)]);
   await pool.query("INSERT INTO settings(key,value) VALUES('stepup_portal_required','false')");
+  await setSetting('mail_from','fixture@example.invalid');await setSetting('cf_account_id','fixture');
+  await setSetting('cf_api_base',`http://127.0.0.1:${providerPort}`);await setSecretSetting('cf_api_token','synthetic-provider-credential');
+  await t.test('plain code details are retired and wrong-address first submit has no side effects or recipient disclosure',async()=>{
+   const inv=await make(),wrong=mailbox(),rid=randomUUID(),path='/internal/register/start';
+   const snapshot=async()=>({
+    invitation:(await pool.query('SELECT * FROM invitation_codes WHERE id=$1',[inv.id])).rows[0],
+    jobs:(await pool.query('SELECT * FROM invitation_mail_jobs WHERE invitation_id=$1 ORDER BY id',[inv.id])).rows,
+    requests:(await pool.query('SELECT * FROM invitation_mail_requests WHERE invitation_id=$1 ORDER BY request_id',[inv.id])).rows,
+    wrongQuota:await redis.get('reg:rl:'+wrong),
+   });
+   const before=await snapshot();
+   const denied=await route(registerRouter,path,path,{...await assertion(path),code:inv.code,email:wrong,request_id:rid});
+   assert.equal(denied.statusCode,403);assert.deepEqual(denied.body,{request_id:rid,error:'email_mismatch',errors:{email:'email_mismatch'}});
+   assert.ok(!JSON.stringify(denied.body).includes(inv.bound_email!));assert.deepEqual(await snapshot(),before);
+   assert.equal((await pool.query('SELECT 1 FROM identities WHERE email=$1',[wrong])).rowCount,0);
+   const old='/internal/register/invitation';
+   const retired=await route(registerRouter,old,old,{code:inv.code,email:wrong,request_id:rid});
+   assert.equal(retired.statusCode,404);assert.deepEqual(retired.body,{error:'not_found'});
+  });
+  await t.test('synchronous public send requires UUID and preserves proof-only locked-email prefill',async()=>{
+   const inv=await make(),start='/internal/register/start',rid=randomUUID(),before=sends;
+   const missing=await route(registerRouter,start,start,{...await assertion(start),code:inv.code,email:inv.bound_email});
+   assert.equal(missing.statusCode,422);assert.equal(missing.body.error,'invalid_request_id');assert.equal(sends,before);
+   const accepted=await route(registerRouter,start,start,{...await assertion(start),code:inv.code,email:inv.bound_email,request_id:rid});
+   assert.equal(accepted.statusCode,200);assert.equal(accepted.body.request_id,rid);assert.equal(accepted.body.result,'sent');
+   assert.equal(accepted.body.mail.state,'sent');assert.equal(sends,before+1);
+   assert.ok(!JSON.stringify(accepted.body).includes(inv.bound_email!));assert.equal(accepted.body.invitation,undefined);
+   const proofPath='/internal/register/validate',token=delivered.get(inv.bound_email!)!;
+   const valid=await route(registerRouter,proofPath,proofPath,{...await assertion(proofPath),email:inv.bound_email,token});
+   assert.equal(valid.statusCode,200);assert.equal(valid.body.bound_email,inv.bound_email);assert.equal(valid.body.invitation.bound_email,inv.bound_email);
+   const invalid=await route(registerRouter,proofPath,proofPath,{...await assertion(proofPath),email:mailbox(),token});
+   assert.equal(invalid.statusCode,422);assert.equal(invalid.body.error,'invalid_token');assert.ok(!JSON.stringify(invalid.body).includes(inv.bound_email!));
+   assert.ok(!(registerRouter as any).stack.some((layer:any)=>layer.route?.path==='/internal/register/status'));
+  });
+  await t.test('same-UUID concurrent sends reuse one provider result and replays read their exact job',async()=>{
+   const inv=await make(),path='/internal/register/start',rid=randomUUID(),before=sends;
+   const start=async(id:string)=>route(registerRouter,path,path,{...await assertion(path),code:inv.code,email:inv.bound_email,request_id:id});
+   const replies=await Promise.all([start(rid),start(rid)]);
+   for(const reply of replies){assert.equal(reply.statusCode,200);assert.equal(reply.body.result,'sent');}
+   assert.equal(sends,before+1);
+   await pool.query('UPDATE invitation_codes SET mail_next_retry_at=NULL WHERE id=$1',[inv.id]);await redis.del('reg:rl:'+inv.bound_email);
+   const newer=await tx(db=>queueInvitationMail(db,inv,{actorSub:null,requestId:randomUUID(),requireQueued:true}));
+   const failed=await dispatchInvitationMailJob(newer.jobId!,{database:pool,send:async()=>({ok:false,reason:'rejected'}),deadline:Date.now()+2000});
+   assert.equal(failed?.state,'failed');assert.equal(failed?.error_code,'rejected');
+   assert.equal((await pool.query('SELECT mail_state FROM invitation_codes WHERE id=$1',[inv.id])).rows[0].mail_state,'failed');
+   const replay=await start(rid);assert.equal(replay.statusCode,200);assert.equal(replay.body.mail.state,'sent');assert.equal(sends,before+1);
+  });
+  await t.test('different public request UUIDs coalesce while provider acceptance is still in flight',async()=>{
+   const inv=await make(),path='/internal/register/start';let release!:()=>void,entered!:()=>void;
+   const gate=new Promise<void>(r=>{release=r;}),ready=new Promise<void>(r=>{entered=r;});
+   providerHold=async()=>{entered();await gate;};const before=providerCalls;
+   const start=async()=>route(registerRouter,path,path,{...await assertion(path),code:inv.code,email:inv.bound_email,request_id:randomUUID()});
+   const first=start();let second:ReturnType<typeof start>|undefined;
+   try{
+    await ready;second=start();
+    const deadline=Date.now()+2000;
+    while((await pool.query("SELECT count(*)::int AS n FROM invitation_mail_requests WHERE invitation_id=$1 AND actor_key=$2",[inv.id,'public:'+inv.id])).rows[0].n<2){
+     assert.ok(Date.now()<deadline,'second transaction proceeds while provider call has no role/row lock');await new Promise(r=>setTimeout(r,10));
+    }
+    assert.equal(providerCalls,before+1);
+   }finally{providerHold=null;release();}
+   assert.equal((await first).body.result,'sent');assert.equal((await second!).body.result,'sent');assert.equal(providerCalls,before+1);
+  });
+  await t.test('provider rejection, bounce/configuration and ambiguous outcomes keep precise durable response classes',async()=>{
+   const path='/internal/register/start';
+   for(const item of [
+    {http:422,body:{success:false},status:502,error:'send_failed',code:'rejected'},
+    {http:200,body:{success:true,result:{permanent_bounces:['synthetic@example.invalid']}},status:502,error:'send_failed',code:'bounced'},
+    {http:401,body:{success:false},status:503,error:'email_not_configured',code:'email_not_configured'},
+    {http:503,body:{success:false},status:202,error:null,code:'delivery_unknown'},
+   ]){
+    const inv=await make(),rid=randomUUID(),before=providerCalls;providerReply={status:item.http,body:item.body};
+    try{
+     const invoke=async()=>route(registerRouter,path,path,{...await assertion(path),code:inv.code,email:inv.bound_email,request_id:rid});
+     const result=await invoke();assert.equal(result.statusCode,item.status);assert.equal(result.body.mail.error_code,item.code);
+     if(item.error)assert.equal(result.body.error,item.error);else assert.equal(result.body.result,'unknown');
+     assert.equal(providerCalls,before+1);const again=await invoke();assert.equal(again.statusCode,item.status);assert.equal(providerCalls,before+1);
+    }finally{providerReply=null;}
+   }
+  });
+  await t.test('open-registration ambiguous delivery retains its quota and never claims definite failure',async()=>{
+   const path='/internal/register/start',email=mailbox();await setSetting('require_invitation_code','false');providerReply={status:503,body:{success:false}};
+   try{
+    const result=await route(registerRouter,path,path,{...await assertion(path),email});
+    assert.equal(result.statusCode,202);assert.equal(result.body.result,'unknown');assert.equal(result.body.mail.error_code,'delivery_unknown');
+    const quota=await redis.hgetall('reg:rl:'+email);assert.equal(Number(quota.count),1);
+   }finally{providerReply=null;await setSetting('require_invitation_code','true');}
+  });
+  await t.test('targeted sends and terminal replays never claim an unrelated older queued job',async()=>{
+   const older=await make(),target=await make();
+   const job=(await pool.query('SELECT id FROM invitation_mail_jobs WHERE invitation_id=$1',[target.id])).rows[0];
+   const sentTo:string[]=[];const deliver=async(args:any)=>{sentTo.push(args.to);return {ok:true as const};};
+   assert.equal((await dispatchInvitationMailJob(job.id,{database:pool,send:deliver,deadline:Date.now()+2000}))?.state,'sent');
+   assert.deepEqual(sentTo,[target.bound_email]);
+   assert.equal((await pool.query('SELECT state FROM invitation_mail_jobs WHERE invitation_id=$1',[older.id])).rows[0].state,'queued');
+   assert.equal((await dispatchInvitationMailJob(job.id,{database:pool,send:deliver,deadline:Date.now()+2000}))?.state,'sent');
+   assert.deepEqual(sentTo,[target.bound_email]);
+   assert.equal((await pool.query('SELECT state FROM invitation_mail_jobs WHERE invitation_id=$1',[older.id])).rows[0].state,'queued');
+  });
+  await t.test('a foreign worker lease is awaited to its actual terminal state without another provider call',async()=>{
+   const inv=await make(),job=(await pool.query('SELECT id FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rows[0];
+   await pool.query("UPDATE invitation_mail_jobs SET state='sending',lease_id=$2,lease_until=clock_timestamp()+interval '45 seconds' WHERE id=$1",[job.id,randomUUID()]);
+   let finished=false,count=0;const wait=dispatchInvitationMailJob(job.id,{database:pool,send:async()=>{count++;return {ok:true};},deadline:Date.now()+2000}).then(result=>{finished=true;return result;});
+   await new Promise(r=>setTimeout(r,30));assert.equal(finished,false);assert.equal(count,0);
+   await pool.query("UPDATE invitation_mail_jobs SET state='sent',payload_enc=NULL,finished_at=clock_timestamp(),lease_id=NULL,lease_until=NULL WHERE id=$1",[job.id]);
+   assert.equal((await wait)?.state,'sent');assert.equal(count,0);
+  });
+  await t.test('a worker-owned send and targeted duplicate waiters serialize on one provider operation',async()=>{
+   // Drain preceding independent fixtures, then make this job the worker's head.
+   while((await pool.query("SELECT 1 FROM invitation_mail_jobs WHERE state='queued' LIMIT 1")).rowCount)await drainInvitationMail({database:pool,send});
+   const inv=await make(),job=(await pool.query('SELECT id FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rows[0];
+   let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>{release=r;}),ready=new Promise<void>(r=>{entered=r;});let count=0;
+   const worker=drainInvitationMail({database:pool,send:async()=>{count++;entered();await gate;return {ok:true};}});
+   await ready;
+   const first=dispatchInvitationMailJob(job.id,{database:pool,send:async()=>{count++;return {ok:true};},deadline:Date.now()+2000});
+   const second=dispatchInvitationMailJob(job.id,{database:pool,send:async()=>{count++;return {ok:true};},deadline:Date.now()+2000});
+   await new Promise(r=>setTimeout(r,20));assert.equal(count,1);release();
+   await worker;assert.equal((await first)?.state,'sent');assert.equal((await second)?.state,'sent');assert.equal(count,1);
+  });
+  await t.test('deadline responses do not cancel delivery and shutdown settlement joins the real send',async()=>{
+   const inv=await make(),job=(await pool.query('SELECT id FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rows[0];
+   let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>{release=r;}),ready=new Promise<void>(r=>{entered=r;});let count=0;
+   const result=dispatchInvitationMailJob(job.id,{database:pool,send:async()=>{count++;entered();await gate;return {ok:true};},deadline:Date.now()+100});
+   await ready;assert.equal(await result,null);assert.equal(count,1);
+   let settled=false;const closing=settleInvitationMail().then(()=>{settled=true;});await new Promise(r=>setTimeout(r,20));assert.equal(settled,false);
+   release();await closing;assert.equal((await pool.query('SELECT state FROM invitation_mail_jobs WHERE id=$1',[job.id])).rows[0].state,'sent');
+   const replay=await dispatchInvitationMailJob(job.id,{database:pool,send:async()=>{count++;return {ok:true};},deadline:Date.now()+1000});
+   assert.equal(replay?.state,'sent');assert.equal(count,1);
+  });
+  await t.test('provider acceptance with failed finish stays pending then becomes unknown without re-sending',async()=>{
+   const inv=await make(),job=(await pool.query('SELECT id FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rows[0];let count=0;
+   const database={query:pool.query.bind(pool),connect:async()=>{const db=await pool.connect();return {release:()=>db.release(),query:(sql:string,values?:any[])=>{
+    if(sql.startsWith('UPDATE invitation_mail_jobs SET state=$3'))throw Error('synthetic finish outage');return db.query(sql,values);
+   }};}} as unknown as pg.Pool;
+   const result=await dispatchInvitationMailJob(job.id,{database,send:async()=>{count++;return {ok:true};},deadline:Date.now()+1000});
+   assert.equal(result,null);assert.equal(count,1);
+   await pool.query("UPDATE invitation_mail_jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",[job.id]);
+   await drainInvitationMail({database:pool,send:async()=>{count++;return {ok:true};}});
+   const row=(await pool.query('SELECT state,payload_enc FROM invitation_mail_jobs WHERE id=$1',[job.id])).rows[0];assert.equal(row.state,'unknown');assert.equal(row.payload_enc,null);assert.equal(count,1);
+  });
   await t.test('queue and binding commit together; only encrypted proof is retained before send',async()=>{
    const inv=await make(),job=(await pool.query('SELECT * FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rows[0];
    assert.equal(job.state,'queued');assert.ok(Buffer.isBuffer(job.payload_enc));assert.equal(job.proof_hash.length,32);
@@ -162,8 +316,8 @@ test('invitation mail and account creation share durable single-use state',async
    assert.equal((await pool.query('SELECT 1 FROM invitation_mail_requests WHERE invitation_id=$1',[inv.id])).rowCount,0);
    const other=mailbox();
    const accepted=await route(registerRouter,path,path,{...await assertion(path),code:inv.code,email:other,request_id:requestId});
-   assert.equal(accepted.statusCode,200);assert.equal(accepted.body.queued,true);assert.equal(accepted.body.sent,false);
-   assert.equal(accepted.body.bound_email,other);
+   assert.equal(accepted.statusCode,200);assert.equal(accepted.body.result,'sent');assert.equal(accepted.body.mail.state,'sent');
+   assert.ok(!JSON.stringify(accepted.body).includes(other));
    assert.equal((await pool.query('SELECT bound_email FROM invitation_codes WHERE id=$1',[inv.id])).rows[0].bound_email,other);
    assert.equal((await pool.query('SELECT 1 FROM invitation_mail_jobs WHERE invitation_id=$1',[inv.id])).rowCount,1);
    await drainInvitationMail({database:pool,send});assert.ok(delivered.get(other));
@@ -172,18 +326,18 @@ test('invitation mail and account creation share durable single-use state',async
    const path='/internal/register/start';
    await setSetting('require_invitation_code','true');
    for(const code of ['', 'not-a-code']){
-    const response=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code});
+    const response=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code,request_id:randomUUID()});
     assert.equal(response.statusCode,422);assert.equal(response.body.errors.code,'invalid_code');
    }
-   const absent=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:'ZZZZZZZZZZZZ'});
+   const absent=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:'ZZZZZZZZZZZZ',request_id:randomUUID()});
    assert.equal(absent.statusCode,422);assert.equal(absent.body.error,'invalid_invitation');
    const inv=await tx(async db=>(await createInvitation(db,actor,{request_id:randomUUID(),role_slug:'member',delivery:'link'})).invitation);
    await pool.query("UPDATE invitation_codes SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[inv.id]);
-   const expired=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:inv.code});
+   const expired=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:inv.code,request_id:randomUUID()});
    assert.equal(expired.statusCode,409);assert.equal(expired.body.error,'invitation_expired');
   });
   await t.test('disabled invitations ignore even malformed supplied codes and use email-only registration',async()=>{
-   const path='/internal/register/start';await setSetting('require_invitation_code','false');
+   const path='/internal/register/start';await setSetting('require_invitation_code','false');await setSetting('cf_account_id','');
    try{
     const badEmail=await route(registerRouter,path,path,{...await assertion(path),email:'not-an-email',code:'not-a-code'});
     assert.equal(badEmail.statusCode,422);assert.equal(badEmail.body.errors.email,'invalid_email');
@@ -191,7 +345,7 @@ test('invitation mail and account creation share durable single-use state',async
     // This isolated fixture deliberately has no provider credentials. Reaching
     // the open-registration mail configuration guard proves the code was ignored.
     assert.equal(validEmail.statusCode,503);assert.equal(validEmail.body.error,'email_not_configured');
-   }finally{await setSetting('require_invitation_code','true');}
+   }finally{await setSetting('require_invitation_code','true');await setSetting('cf_account_id','fixture');}
   });
   await t.test('actual admin resend handler returns429 and rolls back receipt/audit, then same request queues once',async()=>{
    const inv=await make();await drainInvitationMail({database:pool,send});const requestId=randomUUID();
@@ -246,5 +400,5 @@ test('invitation mail and account creation share durable single-use state',async
     const sql=await readFile(new URL('../db/migrations/'+name,import.meta.url),'utf8');await pool.query(sql);await pool.query(sql);
    }
   });
- }finally{await pool.end();await redis.quit();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();}
+ }finally{provider.closeAllConnections();await new Promise<void>(resolve=>provider.close(()=>resolve()));await settleInvitationMail();await pool.end();await redis.quit();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();}
 });

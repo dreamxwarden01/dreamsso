@@ -88,7 +88,8 @@ Mail status is separate from invitation status: queued or sending does not mean
 sent, and sent means the provider accepted the message. Failed or uncertain sends
 remain visible and can be explicitly retried. A send failure does not revoke the
 invitation. Management requests use request IDs so a response retry does not create
-a second invitation or queue a second send.
+a second invitation or queue a second send. Registration email requests wait for the
+provider result; an unconfirmed request can be retried with its existing ID.
 
 The list provides All, Current and History views, server-side search and sorting,
 and pages of 10, 25 or 100 records. Used, expired, revoked and invalid invitations

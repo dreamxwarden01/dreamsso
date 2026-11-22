@@ -61,8 +61,8 @@ Organization → Invitations supports direct email invitations and shareable lin
 codes, with an offered role, optional email and a note of up to 60 characters.
 The default validity is 72 hours, with 24-hour, 3-day and 7-day presets.
 An optional creation email is fixed; an unbound invitation binds to the address
-used for its first accepted registration-email request. The form displays a bound address
-as read-only, and the SSO rejects a different address.
+used for its first accepted registration-email request. A different address is rejected
+on that form. The emailed verification link then opens a read-only address field.
 
 Invitations are single-use. Resends keep the original expiry; revoked, expired or
 ineligible invitations cannot finish registration. Deleting the offered role or
@@ -73,16 +73,20 @@ server-side search, sorting and 10/25/100-row pages.
 Mail status is independent: **Queued**, **Sending**, **Sent** (provider accepted),
 **Failed** or **Unknown**. Retrying an uncertain request uses the same request ID;
 an explicit resend is a new operation. The share link contains the invitation code;
-the mailbox-verification link is sent only to the bound address. Opening a link or
-previewing an invitation does not send mail or consume it.
+the mailbox-verification link is sent only to the bound address. Opening a share link
+only prefills its code; recipient details are available after email-proof validation.
 
-The first registration form shows email and Turnstile together. When invitation-only
+Registration email requests wait for the provider response. A confirmed send opens
+the result page immediately; an unconfirmed request retains its ID for a safe retry.
+Turnstile appears when a submission is eligible and returns after the resend cooldown.
+
+The first registration form collects an email address. When invitation-only
 registration is enabled, it also requires a code; when disabled, supplied codes are
 ignored. After human verification, the SSO checks the invitation before validating
 the email. There is no separate code-preflight screen.
 
 The BFF gates anonymous email requests/resends and final sign-up with Turnstile.
-Invitation preview and token-gated username checks do not require an extra challenge.
+Email-proof validation and token-gated username checks do not require an extra challenge.
 The SSO atomically creates the account, assigns its role and consumes the invitation.
 After completion, the browser follows the returned sign-in URL; a confirmed retry
 can use normal sign-in without creating another account.

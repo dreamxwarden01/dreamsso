@@ -23,7 +23,7 @@ import { changePendingForAddress } from '../emailChange.js';
 
 import { withRoleTransaction } from '../rbac/roleChanges.js';
 import { lockInvitation, validateLockedInvitation, readInvitationPreview, InvitationError } from '../invitations.js';
-import { queueInvitationMail, readInvitationProof, invitationProofHash } from '../invitationMail.js';
+import { queueInvitationMail, dispatchInvitationMailJob, trackInvitationMailWork, readInvitationProof, invitationProofHash } from '../invitationMail.js';
 import { commitRegistration } from '../registrationStore.js';
 
 export const registerRouter = Router();
@@ -35,21 +35,25 @@ const USERNAME_RE = /^[A-Za-z0-9_-]{3,20}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const registrationEnabled = async () => (await getSetting('enable_registration','false')) === 'true';
 const invitationRequired = async () => (await getSetting('require_invitation_code','true')) === 'true';
-function fail(res: Response,error: unknown) {
-  if(error instanceof InvitationError) return res.status(error.status).json(error.body);
-  console.warn('registration_unavailable');return res.status(503).json({error:'registration_unavailable'});
+function fail(res: Response,error: unknown,requestId?:string) {
+  const identity=requestId&&UUID_RE.test(requestId)?{request_id:requestId}:{};
+  if(error instanceof InvitationError && error.code==='email_mismatch')
+    return res.status(error.status).json({...identity,error:'email_mismatch',errors:{email:'email_mismatch'}});
+  if(error instanceof InvitationError) return res.status(error.status).json({...identity,...error.body});
+  console.warn('registration_unavailable');return res.status(503).json({...identity,error:'registration_unavailable'});
 }
-function publicInvitation(row:any) {
+function publicInvitation(row:any, recipient = false) {
   const status = row.used_at ? 'used' : row.voided_at ? 'revoked' : row.invalidated_at ? 'unavailable'
     : new Date(row.expires_at).getTime()<=Date.now() ? 'expired' : 'unused';
   return {code:row.code,label:'Invitation',status,role:{id:row.invited_role_slug,name:row.invited_role_label || row.invited_role_slug},
-    created_at:row.created_at,expires_at:row.expires_at,bound_email:row.bound_email,bound_at:row.bound_at,
-    mail:{state:row.mail_state,at:row.mail_last_at,error_code:row.mail_error_code}};
+    created_at:row.created_at,expires_at:row.expires_at,
+    ...(recipient ? {bound_email:row.bound_email,bound_at:row.bound_at,
+      mail:{state:row.mail_state,at:row.mail_last_at,error_code:row.mail_error_code}} : {})};
 }
-async function currentInvitation(code:string) {
+async function currentInvitation(code:string, recipient = false) {
   const row=await readInvitationPreview(pool,code);
   if(!row)throw new InvitationError(404,'invalid_invitation');
-  return publicInvitation(row);
+  return publicInvitation(row,recipient);
 }
 async function proofFor(email:string,token:string,includeExpired=false) {
   const modern = await readInvitationProof(pool,email,token,includeExpired);
@@ -59,16 +63,11 @@ async function proofFor(email:string,token:string,includeExpired=false) {
   return {code:old.code,expiresAt:new Date((old.createdAt+30*60)*1000),modern:false};
 }
 
-registerRouter.post('/internal/register/invitation',async(req:Request,res:Response)=>{
-  const body=req.body??{};
-  if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
-  if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
-  const code=qstr(body.code).trim().toUpperCase();
-  if(!CODE_RE.test(code))return res.status(404).json({error:'invalid_invitation'});
-  try{return res.json({invitation:await currentInvitation(code)});}catch(error){return fail(res,error);}
-});
+// Retired: an invitation code is not a capability to inspect recipient details.
+registerRouter.post('/internal/register/invitation',(_req:Request,res:Response)=>res.status(404).json({error:'not_found'}));
 
 registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>{
+  const deadline=Date.now()+12_500;
   const body=req.body??{};
   if(!(await isPortalAssertion(body,{method:req.method,path:req.path})))return res.status(401).json({error:'invalid_client'});
   if(!(await registrationEnabled()))return res.status(403).json({error:'registration_closed'});
@@ -78,23 +77,43 @@ registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>
   const code=requireCode?qstr(body.code).trim().toUpperCase():'';
   if(requireCode){
     if(!CODE_RE.test(code))return res.status(422).json({errors:{code:'invalid_code'}});
-    if(body.request_id!==undefined&&!UUID_RE.test(qstr(body.request_id)))return res.status(422).json({error:'invalid_request_id'});
+    if(!UUID_RE.test(qstr(body.request_id)))return res.status(422).json({error:'invalid_request_id'});
+    const requestId=qstr(body.request_id).toLowerCase();
+    let timer: ReturnType<typeof setTimeout>;
     try {
-      const result=await withRoleTransaction(async db=>{
-        const row=await lockInvitation(db,code);if(!row)throw new InvitationError(422,'invalid_invitation');
-        await validateLockedInvitation(db,row,email,false);
-        if(!EMAIL_RE.test(email)||email.length>254)throw new InvitationError(422,'invalid_email');
-        if((await db.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount || await changePendingForAddress(email))
-          throw new InvitationError(422,'email_taken');
-        await validateLockedInvitation(db,row,email,true);
-        const locked=(await lockInvitation(db,code))!;
-        const queued=await queueInvitationMail(db,locked,{actorSub:null,requestId:qstr(body.request_id)||crypto.randomUUID(),requireQueued:true});
-        return {queued,invitation:publicInvitation((await lockInvitation(db,code))!)};
-      });
-      const common={email,bound_email:email,expires_at:result.invitation.expires_at,invitation:result.invitation};
-      return res.json({...common,queued:result.queued.queued,sent:result.invitation.mail.state==='sent',resend_backoff:result.queued.retry_after??60});
-    }catch(error){return fail(res,error);}
+      const work=trackInvitationMailWork((async()=>{
+        const result=await withRoleTransaction(async db=>{
+          await db.query("SET LOCAL lock_timeout='3s'");
+          const row=await lockInvitation(db,code);if(!row)throw new InvitationError(422,'invalid_invitation');
+          await validateLockedInvitation(db,row,email,false);
+          if(!EMAIL_RE.test(email)||email.length>254)throw new InvitationError(422,'invalid_email');
+          if((await db.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount || await changePendingForAddress(email))
+            throw new InvitationError(422,'email_taken');
+          await validateLockedInvitation(db,row,email,true);
+          const locked=(await lockInvitation(db,code))!;
+          const queued=await queueInvitationMail(db,locked,{actorSub:null,requestId,requireQueued:true});
+          return {queued,expires_at:locked.expires_at};
+        });
+        if(!result.queued.jobId)throw Error('missing_mail_job');
+        const job=await dispatchInvitationMailJob(result.queued.jobId,{deadline});
+        const backoff=result.queued.retry_after??60;
+        const common={request_id:requestId,expires_at:result.expires_at,resend_backoff:backoff};
+        if(!job)return {status:202,body:{...common,result:'pending'}};
+        const mail={state:job.state,at:job.finished_at??job.created_at,error_code:job.error_code};
+        if(job.state==='sent')return {status:200,body:{...common,result:'sent',sent:true,mail}};
+        if(job.state==='unknown')return {status:202,body:{...common,result:'unknown',mail,retry_after:backoff}};
+        if(job.state==='failed')return {status:job.error_code==='email_not_configured'?503:502,
+          body:{...common,error:job.error_code==='email_not_configured'?'email_not_configured':'send_failed',mail,retry_after:backoff}};
+        return {status:202,body:{...common,result:'pending',mail}};
+      })());
+      const timeout=new Promise<null>(resolve=>{timer=setTimeout(()=>resolve(null),Math.max(0,deadline-Date.now()));});
+      const outcome=await Promise.race([work,timeout]);
+      if(!outcome)return res.status(202).json({result:'pending',request_id:requestId});
+      return res.status(outcome.status).json(outcome.body);
+    }catch(error){return fail(res,error,requestId);}
+    finally{clearTimeout(timer!);}
   }
+
   // Open registration retains its short email-verification flow; invitations use the durable queue above.
   if(!EMAIL_RE.test(email)||email.length>254)return res.status(422).json({errors:{email:'invalid_email'}});
   if((await pool.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount||await changePendingForAddress(email))
@@ -107,8 +126,12 @@ registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>
   const pending=await validatePending(email,token);
   const sent=await sendEmail({to:email,...renderRegistrationEmail({siteName:await siteName(),link:`${await portalUrl()}/register/complete?email=${encodeURIComponent(email)}&token=${token}`,
     expiresAt:new Date(((pending?.createdAt??Math.floor(Date.now()/1000))+registrationLinkValidityMinutes*60)*1000).toISOString()})});
-  if(!sent.ok){await releaseRegistrationSend(email);return res.status(503).json({error:'send_failed'});}
-  return res.json({sent:true,resend_backoff:slot.nextBackoff});
+  if(!sent.ok){
+    if(['unreachable','unknown'].includes(sent.reason))return res.status(202).json({result:'unknown',mail:{state:'unknown',error_code:'delivery_unknown'},retry_after:slot.nextBackoff,resend_backoff:slot.nextBackoff});
+    await releaseRegistrationSend(email);
+    return res.status(['not_configured','email_not_configured'].includes(sent.reason)?503:502).json({error:['not_configured','email_not_configured'].includes(sent.reason)?'email_not_configured':'send_failed'});
+  }
+  return res.json({result:'sent',sent:true,mail:{state:'sent',error_code:null},resend_backoff:slot.nextBackoff});
 });
 
 registerRouter.post('/internal/register/validate',async(req:Request,res:Response)=>{
@@ -118,7 +141,7 @@ registerRouter.post('/internal/register/validate',async(req:Request,res:Response
   const email=qstr(body.email).trim().toLowerCase(),proof=await proofFor(email,qstr(body.token),true);
   if(!proof)return res.status(422).json({error:'invalid_token'});
   try {
-    const invitation=proof.code?await currentInvitation(proof.code):null;
+    const invitation=proof.code?await currentInvitation(proof.code,true):null;
     if(invitation&&invitation.status!=='unused')return res.status(409).json({error:'invitation_'+invitation.status,invitation});
     if(invitation?.bound_email&&invitation.bound_email.toLowerCase()!==email)return res.status(403).json({error:'email_mismatch'});
     return res.json({valid:true,email,bound_email:invitation?.bound_email??email,expires_at:proof.expiresAt,invitation});
@@ -132,7 +155,7 @@ registerRouter.post('/internal/register/check-username',async(req:Request,res:Re
   const email=qstr(body.email).trim().toLowerCase(),proof=await proofFor(email,qstr(body.token));
   if(!proof)return res.status(422).json({error:'invalid_token'});
   try {
-    if(proof.code){const invitation=await currentInvitation(proof.code);if(invitation.status!=='unused')return res.status(409).json({error:'invitation_'+invitation.status});
+    if(proof.code){const invitation=await currentInvitation(proof.code,true);if(invitation.status!=='unused')return res.status(409).json({error:'invitation_'+invitation.status});
       if(invitation.bound_email&&invitation.bound_email.toLowerCase()!==email)return res.status(403).json({error:'email_mismatch'});}
     const username=qstr(body.username).trim();
     if(!USERNAME_RE.test(username))return res.status(422).json({errors:{username:'invalid_username'}});
