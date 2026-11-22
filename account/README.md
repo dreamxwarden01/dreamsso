@@ -78,7 +78,9 @@ only prefills its code; recipient details are available after email-proof valida
 
 Registration email requests wait for the provider response. A confirmed send opens
 the result page immediately; an unconfirmed request retains its ID for a safe retry.
-Turnstile appears when a submission is eligible and returns after the resend cooldown.
+Turnstile loads alongside the form, independently of input validity. Its completed
+widget stays in place while sending, resets after a retryable rejection, and returns
+after the resend cooldown.
 
 The first registration form collects an email address. When invitation-only
 registration is enabled, it also requires a code; when disabled, supplied codes are

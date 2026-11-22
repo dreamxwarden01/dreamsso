@@ -33,7 +33,7 @@ export default function RegisterStartPage() {
   const [sendBlocked, setSendBlocked] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState(null);
   const ceremonySeq = useRef(0), requestRef = useRef(null), confirmedRequest = useRef(false), mounted = useRef(true);
-  const humanSlot = useRef(null), pendingHeight = useRef(0);
+  const [challengeVersion, setChallengeVersion] = useState(0);
   const feedback = useRecipientFeedback();
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; ceremonySeq.current++; }; }, []);
@@ -52,7 +52,9 @@ export default function RegisterStartPage() {
   const codeReady = !invitationRequired || (INVITATION_CODE_RE.test(code) && !codeErr);
   const address = (phase === 'sent' ? attemptedEmail : email).trim().toLowerCase();
   const eligible = !effectiveNotice && !feedback.held && !sendBlocked && cooldown === 0 && codeReady && emailValid(address) && !emailErr;
-  const showHuman = eligible;
+  // Field validity gates the button, not human verification. Keep the widget
+  // mounted while a submitted request is waiting for its response.
+  const showHuman = !effectiveNotice && !sendBlocked && cooldown === 0;
   const humanReady = !turnstileSiteKey || !!turnstileToken;
   useEffect(() => { if (!showHuman) setTurnstileToken(null); }, [showHuman]);
 
@@ -61,7 +63,6 @@ export default function RegisterStartPage() {
     if (!eligible || !humanReady) return;
     const submittedCode = invitationRequired ? code : undefined;
     const sequence = ceremonySeq.current;
-    pendingHeight.current = humanSlot.current?.getBoundingClientRect().height || 0;
     if (!feedback.start()) return;
     const proof = turnstileToken; setTurnstileToken(null);
     setFormErr(null); setEmailErr(null); setCodeErr(null); setAttemptedEmail(address);
@@ -107,6 +108,8 @@ export default function RegisterStartPage() {
       if (!invitationRequired && (fields.code || ended === 'invalid')) refreshSite();
       if (err.code === 'registration_closed') { setNotice('closed'); refreshSite(); }
       if (err.code === 'turnstile_failed' && !turnstileSiteKey) refreshSite();
+      // Both resend backoff and exhausted daily quota arrive as 429 with the
+      // authoritative retry_after; neither depends on current field validity.
       if (err.status === 429) setCooldownUntil(Date.now() + Math.max(1, Number(err.data?.retry_after) || 60) * 1000);
       const ownReceipt = !!requestRef.current && err.data?.request_id === requestRef.current.id;
       const settledMail = !fieldRejection && ownReceipt && TERMINAL_MAIL.includes(err.data?.mail?.state) ? err.data.mail.state : null;
@@ -123,14 +126,12 @@ export default function RegisterStartPage() {
       // the send endpoint itself replays its recorded outcome without resending.
       if (err.code === 'email_not_configured') { setSendBlocked(true); setUncertain(false); }
       if (['already_authenticated', 'invalid_request_id', 'request_conflict'].includes(err.code)) { setSendBlocked(true); setUncertain(wasUncertain); }
-      if (mounted.current && sequence === ceremonySeq.current) feedback.reset();
+      if (mounted.current && sequence === ceremonySeq.current) { setChallengeVersion(value => value + 1); feedback.reset(); }
     }
   }
 
-  const human = <div ref={humanSlot} className="registration-human-slot" style={feedback.busy && pendingHeight.current ? { minHeight: pendingHeight.current } : undefined}>
-    {feedback.busy && turnstileSiteKey && <div className="registration-proof-used"><Icon name="check" size={16} /><span>Verified</span></div>}
-    <Turnstile active={showHuman} onToken={setTurnstileToken} onExpire={() => setTurnstileToken(null)} onError={() => setTurnstileToken(null)} />
-  </div>;
+  const human = <Turnstile key={suppliedCode + ':' + invitationRequired} active={showHuman} manualRefresh paused={feedback.busy}
+    resetKey={challengeVersion} onToken={setTurnstileToken} onExpire={() => setTurnstileToken(null)} onError={() => setTurnstileToken(null)} />;
   if (effectiveNotice) return <AuthCard motionKey={effectiveNotice} docTitle="Create account"><RecipientNotice status={effectiveNotice} expiresAt={invitation?.expires_at} signInHref={signInHref} /></AuthCard>;
   if (phase === 'sent') {
     const pending = ['pending', 'queued', 'sending'].includes(mailState), failed = mailState === 'failed', unknown = mailState === 'unknown';

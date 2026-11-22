@@ -149,7 +149,7 @@ test('plain txn signup first screen contains email, required invitation code and
   const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key', ssoUrl: 'https://sso.example.test' } });
   await h.flush(); assert.equal(h.calls.length, 0);
   assert.equal(h.field('reg-email').props.readOnly, false); assert.equal(h.field('reg-code').props.value, '');
-  assert.equal(h.field('reg-code').props.required, true); assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+  assert.equal(h.field('reg-code').props.required, true); assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
   assert.doesNotMatch(h.text(), /Use your invitation|see the access it offers/);
   assert.ok(h.nodes(node => node.type === 'a' && node.props.href === 'https://sso.example.test/login?txn=synthetic-login-txn').length);
   h.unmount();
@@ -159,7 +159,7 @@ test('shared URL only prefills the code in that same form, with no initial invit
   const h = clientFixture('start', { query: 'code=abcd1234efgh&txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
   await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.field('reg-code').props.value, 'ABCD1234EFGH');
   assert.equal(h.field('reg-email').props.value, ''); assert.equal(h.field('reg-email').props.readOnly, false);
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0); h.unmount();
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); h.unmount();
 });
 
 test('manual code is submitted with email and human proof directly, without any preflight', async () => {
@@ -187,17 +187,18 @@ for (const status of ['used', 'expired', 'revoked', 'unavailable']) for (const w
 }
 
 for (const [raw, normalized] of [['', ''], ['A', 'A'], ['ABCD1234EFG', 'ABCD1234EFG'], ['abc-12!', 'ABC12']]) {
-  test('required malformed code is blocked locally without starting human verification: ' + (raw || 'empty'), async () => {
+  test('required malformed code blocks submit while human verification remains present: ' + (raw || 'empty'), async () => {
     const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
     await h.flush(); await h.input('reg-email', 'alex@example.test'); if (raw) await h.input('reg-code', raw);
-    assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+    assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
+    h.prove('synthetic-unspent-proof'); await h.flush();
     assert.equal(h.field('reg-code').props.value, normalized); assert.equal(h.actionButton().props.disabled, true);
     // Invoke the actual form handler directly: disabled-button DOM behavior is
     // insufficient protection against Enter/programmatic submit paths.
     await h.submit(); await h.advance(2500);
     assert.deepEqual(h.calls, []); assert.equal(h.uuidCount(), 0); assert.equal(h.storage.size, 0); assert.equal(h.tokenResetCount(), 0);
-    await h.input('reg-code', 'ABCD1234EFGH'); h.prove('synthetic-fresh-human-proof'); await h.flush(); assert.equal(h.actionButton().props.disabled, false);
-    await h.submit(); assert.equal(h.calls[0].name, 'registerStart'); assert.equal(h.calls[0].args[2], 'synthetic-fresh-human-proof');
+    await h.input('reg-code', 'ABCD1234EFGH'); await h.flush(); assert.equal(h.actionButton().props.disabled, false);
+    await h.submit(); assert.equal(h.calls[0].name, 'registerStart'); assert.equal(h.calls[0].args[2], 'synthetic-unspent-proof');
     assert.equal(h.uuidCount(), 1); h.unmount();
   });
 }
@@ -205,7 +206,7 @@ for (const [raw, normalized] of [['', ''], ['A', 'A'], ['ABCD1234EFG', 'ABCD1234
 test('code blur marks invalid syntax inline; typing clears only the mark until the next blur', async () => {
   const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { turnstileSiteKey: 'synthetic-site-key' } });
   await h.flush(); await h.input('reg-email', 'alex@example.test');
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
   assert.equal(h.field('reg-code').props['aria-invalid'], false);
   await h.blur('reg-code'); assert.equal(h.field('reg-code').props['aria-invalid'], true);
   assert.equal(h.field('reg-code').props['aria-describedby'], 'reg-code-error');
@@ -216,7 +217,8 @@ test('code blur marks invalid syntax inline; typing clears only the mark until t
   assert.match(h.field('reg-code-error').props.children, /12.character/i); assert.equal(h.openBanners().length, 0);
   await h.input('reg-code', 'abcd-1234 efgh'); assert.equal(h.field('reg-code').props.value, 'ABCD1234EFGH');
   assert.equal(h.field('reg-code').props['aria-invalid'], false); h.prove(); await h.flush(); assert.equal(h.actionButton().props.disabled, false);
-  assert.equal(h.calls.length, 0); assert.equal(h.uuidCount(), 0); assert.equal(h.tokenResetCount(), 0); h.unmount();
+  assert.equal(h.calls.length, 0); assert.equal(h.uuidCount(), 0); assert.equal(h.tokenResetCount(), 0);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.resetKey, 0); h.unmount();
 });
 
 for (const error of [
@@ -232,7 +234,9 @@ for (const error of [
   assert.match(message, error.code ? /was not found/ : /is invalid/);
   assert.equal(h.field('reg-code').props['aria-invalid'], true); assert.equal(h.field('reg-code').props['aria-describedby'], 'reg-code-error');
   assert.equal(h.field('reg-code-error').props.role, 'alert'); assert.equal(h.openBanners().length, 0);
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.resetKey, 1);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.paused, false);
   assert.equal(h.actionButton().props.disabled, true); await h.blur('reg-code');
   assert.equal(h.field('reg-code-error').props.children, message); await h.submit(); assert.equal(h.calls.length, 1);
   await h.input('reg-code', 'ZXCV5678BNMQ'); assert.equal(h.field('reg-code').props['aria-invalid'], false);
@@ -254,7 +258,7 @@ test('a definite code error can be edited immediately without waiting for feedba
 test('email blur and editing expose one inline error without opening a duplicate banner', async () => {
   const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-site-key' } });
   await h.flush(); await h.input('reg-email', 'not-an-email');
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
   assert.equal(h.actionButton().props.disabled, true); assert.equal(h.field('reg-email').props['aria-invalid'], false);
   await h.blur('reg-email'); assert.equal(h.field('reg-email').props['aria-invalid'], true);
   assert.equal(h.field('reg-email').props['aria-describedby'], 'reg-email-error');
@@ -262,7 +266,8 @@ test('email blur and editing expose one inline error without opening a duplicate
   await h.input('reg-email', 'still-invalid'); assert.equal(h.field('reg-email').props['aria-invalid'], false);
   assert.equal(h.actionButton().props.disabled, true); await h.blur('reg-email');
   assert.equal(h.field('reg-email').props['aria-invalid'], true); assert.equal(h.openBanners().length, 0);
-  assert.equal(h.calls.length, 0); assert.equal(h.uuidCount(), 0); assert.equal(h.tokenResetCount(), 0); h.unmount();
+  assert.equal(h.calls.length, 0); assert.equal(h.uuidCount(), 0); assert.equal(h.tokenResetCount(), 0);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.resetKey, 0); h.unmount();
 });
 
 for (const error of [
@@ -298,7 +303,7 @@ for (const initialState of ['sent', 'queued']) for (const rejection of [
   assert.equal(h.nodes(node => node.type === 'form').length, 1);
   assert.equal(h.field('reg-email').props.value, 'alex@example.test'); assert.equal(h.field('reg-email').props.readOnly, false); assert.equal(h.field('reg-code').props.readOnly, false);
   assert.equal(h.field('reg-' + rejection.field).props['aria-invalid'], true); assert.ok(h.field('reg-' + rejection.field + '-error').props.children);
-  assert.equal(h.openBanners().length, 0); assert.doesNotMatch(h.text(), /hidden@example.test/); assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+  assert.equal(h.openBanners().length, 0); assert.doesNotMatch(h.text(), /hidden@example.test/); assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
   assert.equal(h.calls.length, 2); if (initialState === 'queued') assert.equal(h.calls[0].args[3], h.calls[1].args[3]);
   assertNoDetailCalls(h); h.unmount();
 });
@@ -332,7 +337,7 @@ for (const mismatch of ['email_mismatch', 'email_bound']) for (const fieldEnvelo
       data: { ...(fieldEnvelope ? { errors: { email: mismatch } } : {}), email: hidden, bound_email: hidden,
         invitation: invitation({ bound_email: hidden, label: note, role: { id: role, name: role }, mail: { state: 'sent' } }) },
     }; } } });
-    await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+    await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
     await h.input('reg-email', 'entered@example.test');
     h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit();
     assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); assert.equal(h.calls[0].args[0], 'entered@example.test');
@@ -341,7 +346,7 @@ for (const mismatch of ['email_mismatch', 'email_bound']) for (const fieldEnvelo
     assert.equal(h.nodes(node => node.props.id === 'recipient-email').length, 0); assert.equal(h.openBanners().length, 0);
     const rendered = JSON.stringify(h.nodes(() => true));
     for (const value of [hidden, note, role]) assert.ok(!rendered.includes(value), 'rejection metadata was rendered');
-    assert.equal(h.nodes(node => node.type === 'turnstile').length, 0, 'known field rejection is not an eligible retry');
+    assert.equal(h.nodes(node => node.type === 'turnstile').length, 1, 'field errors do not suppress human verification');
     await h.input('reg-email', 'another-owned@example.test');
     assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); h.unmount();
   });
@@ -350,7 +355,7 @@ for (const mismatch of ['email_mismatch', 'email_bound']) for (const fieldEnvelo
 for (const query of ['txn=synthetic-login-txn', 'code=ABCD1234EFGH&txn=synthetic-login-txn']) test('invitation feature off ignores code and keeps email plus human verification: ' + query.split('&')[0], async () => {
   const h = clientFixture('start', { query, site: { invitationRequired: false, turnstileSiteKey: 'synthetic-site-key' }, api: { registerStart: async () => ({ sent: true, resend_backoff: 60 }) } });
   await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.nodes(node => node.props.id === 'reg-code').length, 0);
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0); assert.doesNotMatch(h.text(), /Use an invitation code/);
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); assert.doesNotMatch(h.text(), /Use an invitation code/);
   await h.input('reg-email', 'alex@example.test'); h.nodes(node => node.type === 'turnstile')[0].props.onToken('synthetic-human-proof'); await h.flush(); await h.submit();
   assert.match(h.text(), /Check your email/); assert.equal(h.calls[0].args[1], undefined); assert.equal(h.calls[0].args[3], undefined);
   assert.equal(h.calls.filter(call => call.name === 'registerInvitation').length, 0); h.unmount();
@@ -378,14 +383,34 @@ test('definite free-registration mail failure leaves its email editable', async 
   assert.equal(h.field('reg-email').props.readOnly, false); assert.match(h.text(), /could not send the email/); h.unmount();
 });
 
+for (const invitationRequired of [false, true]) test('validity-only field edits preserve a completed verification without issuing a request: invitations=' + invitationRequired, async () => {
+  const h = clientFixture('start', { query: 'txn=synthetic-login-txn', site: { invitationRequired, turnstileSiteKey: 'synthetic-key' } });
+  await h.flush(); h.prove('unspent-field-edit-proof'); await h.flush();
+  const first = h.nodes(node => node.type === 'turnstile')[0].props;
+  assert.equal(h.actionButton().props.disabled, true);
+  if (invitationRequired) await h.input('reg-code', 'ABCD1234EFGH');
+  await h.input('reg-email', 'alex@example.test'); assert.equal(h.actionButton().props.disabled, false);
+  await h.input('reg-email', 'invalid'); assert.equal(h.actionButton().props.disabled, true); await h.submit();
+  const after = h.nodes(node => node.type === 'turnstile')[0].props;
+  assert.equal(after.active, true); assert.equal(after.paused, false); assert.equal(after.resetKey, first.resetKey);
+  assert.equal(h.tokenResetCount(), 0); assert.equal(h.uuidCount(), 0); assert.equal(h.calls.length, 0);
+  await h.input('reg-email', 'alex@example.test'); assert.equal(h.actionButton().props.disabled, false); await h.submit();
+  assert.equal(h.calls[0].args[2], 'unspent-field-edit-proof'); assertNoDetailCalls(h); h.unmount();
+});
+
 test('provider acceptance moves directly from pending form to result without a success dwell or metadata disclosure', async () => {
   const send = deferred();
   const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-key' }, api: { registerStart: () => send.promise } });
-  await h.flush(); assert.equal(h.nodes(node => node.type === 'turnstile').length, 0);
+  await h.flush(); assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
   await h.input('reg-email', 'entered@example.test'); h.prove('proof-once'); await h.flush();
+  const beforeHuman = h.nodes(node => node.type === 'turnstile')[0].props;
   const pending = h.form().props.onSubmit({ preventDefault() {} }); await h.flush();
+  const duringHuman = h.nodes(node => node.type === 'turnstile')[0].props;
+  assert.equal(duringHuman.active, true); assert.equal(duringHuman.manualRefresh, true); assert.equal(duringHuman.paused, true);
+  assert.equal(duringHuman.resetKey, beforeHuman.resetKey); assert.equal(h.tokenResetCount(), 0);
+  assert.equal(h.nodes(node => node.props.className?.includes('turnstile-verified')).length, 0);
   assert.equal(h.field('reg-email').props.readOnly, true); assert.equal(h.field('reg-code').props.readOnly, true);
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0); assert.equal(h.calls[0].args[2], 'proof-once');
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); assert.equal(h.calls[0].args[2], 'proof-once');
   const id = h.calls[0].args[3];
   send.resolve(sendBody(id, { email: 'hidden@example.test', bound_email: 'hidden@example.test', invitation: invitation({ bound_email: 'hidden@example.test', label: 'private-note' }) }));
   await pending; await h.flush();
@@ -397,24 +422,29 @@ test('provider acceptance moves directly from pending form to result without a s
   assert.deepEqual(h.calls.map(call => call.name), ['registerStart']); h.unmount();
 });
 
-test('a submitted proof is unavailable while pending and must be replaced after a definite human-check failure', async () => {
+test('the completed widget remains paused during HTTP and resets in place after an allowed human-check failure', async () => {
   const send = deferred(); let requests = 0;
   const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-key' }, api: { registerStart: async (...args: any[]) => {
     if (++requests === 1) return send.promise; return sendBody(args[3]);
   } } });
   await h.flush(); await h.input('reg-email', 'alex@example.test'); h.prove('first-proof'); await h.flush();
+  const before = h.nodes(node => node.type === 'turnstile')[0].props;
   const pending = h.form().props.onSubmit({ preventDefault() {} }); await h.flush();
-  assert.equal(h.nodes(node => node.type === 'turnstile').length, 0); await h.submit(); assert.equal(h.calls.length, 1);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.paused, true);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.resetKey, before.resetKey);
+  assert.equal(h.nodes(node => node.type === 'turnstile').length, 1); await h.submit(); assert.equal(h.calls.length, 1);
   send.reject({ status: 403, code: 'turnstile_failed' }); await pending; await h.flush();
   assert.equal(h.field('reg-email').props.readOnly, false); assert.equal(h.nodes(node => node.type === 'turnstile').length, 1);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.paused, false);
+  assert.equal(h.nodes(node => node.type === 'turnstile')[0].props.resetKey, before.resetKey + 1);
   assert.equal(h.actionButton().props.disabled, true); await h.submit(); assert.equal(h.calls.length, 1);
   h.prove('fresh-proof'); await h.flush(); await h.submit();
   assert.deepEqual(h.calls.map(call => call.args[2]), ['first-proof', 'fresh-proof']); assertNoDetailCalls(h); h.unmount();
 });
 
-test('initial rate rejection keeps values editable but removes the widget until cooldown ends', async () => {
+for (const canRetry of [true, false]) test('rate rejection suppresses verification through retry_after, including daily exhaustion: can_retry=' + canRetry, async () => {
   const h = clientFixture('start', { site: { turnstileSiteKey: 'synthetic-key' }, api: { registerStart: async () => { throw {
-    status: 429, code: 'rate_limited', data: { retry_after: 5, can_retry: true },
+    status: 429, code: 'rate_limited', data: { retry_after: 5, can_retry: canRetry },
   }; } } });
   await h.flush(); await h.input('reg-email', 'alex@example.test'); h.prove(); await h.flush(); await h.submit();
   assert.equal(h.field('reg-email').props.readOnly, false); assert.equal(h.field('reg-code').props.readOnly, false);

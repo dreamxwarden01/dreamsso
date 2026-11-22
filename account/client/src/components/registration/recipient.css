@@ -27,6 +27,3 @@
 @keyframes recipient-spin { to { transform: rotate(360deg); } }
 @media (max-width: 520px) { .recipient-form .auth-input { font-size: 16px; } .recipient-button-label { font-size: 14px; } }
 @media (prefers-reduced-motion: reduce) { .recipient-feedback,.recipient-button.auth-btn,.recipient-button-label > span { transition: none; } .recipient-spin { animation: none; border-style: dotted; } }
-
-.registration-human-slot { display: flow-root; }
-.registration-proof-used { display: flex; align-items: center; gap: 8px; min-height: 65px; color: var(--mut); font-size: 13px; }

@@ -7,8 +7,9 @@ import ts from 'typescript';
 // Run the actual component with deterministic hooks, element refs, loader timing
 // and a synthetic provider. No real browser, script request or human proof.
 function fixture(options: { ready?: boolean; active?: boolean; key?: string | null } = {}) {
-  let index = 0, serial = 0, element: any;
+  let index = 0, serial = 0, time = 0, element: any;
   const slots: any[] = [], effects: Function[] = [], intervals = new Map<number, Function>();
+  const timers = new Map<number, { fn: Function; at: number }>(), responses = new Map<string, string>();
   const scripts = new Map<string, any>(), appended: any[] = [], renders: any[] = [], removals: string[] = [], resets: string[] = [];
   const tokens: string[] = [], expired: string[] = [], errors: string[] = [];
   const resetRef: { current: any } = { current: null };
@@ -29,7 +30,8 @@ function fixture(options: { ready?: boolean; active?: boolean; key?: string | nu
   const jsx = (type: any, props: any) => ({ type, props: props || {} });
   const provider = {
     render(container: any, callbacks: any) { const record = { id: 'widget-' + (renders.length + 1), container, callbacks }; renders.push(record); return record.id; },
-    remove(id: string) { removals.push(id); }, reset(id: string) { resets.push(id); },
+    remove(id: string) { removals.push(id); responses.delete(id); }, reset(id: string) { resets.push(id); responses.delete(id); },
+    getResponse(id: string) { return responses.get(id) || ''; },
   };
   const window: any = options.ready ? { turnstile: provider } : {};
   const document = { getElementById: (id: string) => scripts.get(id), createElement: (tag: string) => ({ tag }),
@@ -41,6 +43,8 @@ function fixture(options: { ready?: boolean; active?: boolean; key?: string | nu
   vm.runInNewContext(compiled, { exports, window, document,
     setInterval: (fn: Function, delay: number) => { assert.equal(delay, 100); const id = ++serial; intervals.set(id, fn); return id; },
     clearInterval: (id: number) => intervals.delete(id),
+    setTimeout: (fn: Function, delay: number) => { const id = ++serial; timers.set(id, { fn, at: time + delay }); return id; },
+    clearTimeout: (id: number) => timers.delete(id),
     require: (name: string) => {
       if (name === 'react') return react;
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: Symbol('fragment') };
@@ -58,7 +62,11 @@ function fixture(options: { ready?: boolean; active?: boolean; key?: string | nu
     }
     commitRefs(node.props.children, present);
   }
-  const h = { renders, removals, resets, appended, intervals, tokens, expired, errors, resetRef,
+  const h = { renders, removals, resets, appended, intervals, timers, tokens, expired, errors, resetRef,
+    proof(token: string, widget = renders.at(-1)) { responses.set(widget.id, token); widget.callbacks.callback(token); },
+    advance(ms: number) { const end = time + ms;
+      for (;;) { const due = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break; const [id, timer] = due; time = timer.at; timers.delete(id); timer.fn(); } time = end; },
     render(patch: any = {}) {
       props = { ...props, ...patch }; index = 0; element = exports.default(props);
       const present = new Set<any>(); commitRefs(element, present);
@@ -142,4 +150,83 @@ test('retry before script readiness shares one loader while old polling callback
   const h = fixture(); h.render(); const queued = [...h.intervals.values()][0];
   h.render({ active: false }); h.render({ active: true }); assert.equal(h.appended.length, 1); assert.equal(h.intervals.size, 1);
   h.providerReady(); queued(); assert.equal(h.renders.length, 0); h.poll(); assert.equal(h.renders.length, 1); h.unmount();
+});
+
+
+test('manual refresh disables provider automatic retries while default consumers keep their provider policy', () => {
+  for (const manualRefresh of [false, true]) {
+    const h = fixture({ ready: true }); h.render({ manualRefresh }); const options = h.renders[0].callbacks;
+    for (const name of ['retry', 'refresh-expired', 'refresh-timeout']) assert.equal(options[name], manualRefresh ? 'never' : undefined);
+    h.unmount();
+  }
+});
+
+test('pending HTTP pauses the same completed widget and ignores provider callbacks without reset or replacement', () => {
+  const h = fixture({ ready: true }); h.render({ manualRefresh: true }); const widget = h.renders[0];
+  h.proof('completed-proof'); h.render({ paused: true });
+  h.proof('ignored-pending-proof'); widget.callbacks['expired-callback'](); widget.callbacks['error-callback'](); widget.callbacks['timeout-callback']();
+  h.resetRef.current(); h.advance(16000);
+  assert.deepEqual(h.tokens, ['completed-proof']); assert.deepEqual(h.expired, []); assert.deepEqual(h.errors, []);
+  assert.equal(h.renders.length, 1); assert.equal(h.renders[0].container, widget.container);
+  assert.deepEqual(h.resets, []); assert.deepEqual(h.removals, []); assert.equal(h.timers.size, 0); h.unmount();
+});
+
+test('failure reset key while paused triggers exactly one reset in place when idle again', () => {
+  const h = fixture({ ready: true }); h.render({ manualRefresh: true }); const widget = h.renders[0]; h.proof('spent-proof');
+  h.render({ paused: true }); h.render({ resetKey: 1 }); assert.deepEqual(h.resets, []);
+  h.render({ paused: false }); h.render(); assert.deepEqual(h.resets, [widget.id]);
+  assert.equal(h.renders.length, 1); assert.deepEqual(h.removals, []);
+  widget.callbacks.callback('spent-proof'); assert.deepEqual(h.tokens, ['spent-proof'], 'queued callback cannot resurrect proof cleared by reset');
+  h.proof('fresh-proof'); assert.deepEqual(h.tokens, ['spent-proof', 'fresh-proof']); h.unmount();
+});
+
+for (const event of ['expired-callback', 'timeout-callback']) test('manual ' + event + ' resets idle immediately and defers refresh while paused', () => {
+  const h = fixture({ ready: true }); h.render({ manualRefresh: true }); const widget = h.renders[0];
+  widget.callbacks[event](); assert.deepEqual(h.expired, ['expired']); assert.deepEqual(h.resets, [widget.id]);
+  h.render({ paused: true }); widget.callbacks[event](); widget.callbacks[event](); h.advance(8000);
+  assert.deepEqual(h.expired, ['expired']); assert.deepEqual(h.resets, [widget.id]);
+  h.render({ paused: false }); h.render(); assert.deepEqual(h.resets, [widget.id, widget.id]); assert.deepEqual(h.expired, ['expired', 'expired']); assert.equal(h.renders.length, 1); h.unmount();
+});
+
+test('manual error retries only after eight idle seconds and a valid proof cancels its timer', () => {
+  const h = fixture({ ready: true }); h.render({ manualRefresh: true }); const widget = h.renders[0];
+  widget.callbacks['error-callback'](); assert.deepEqual(h.errors, ['error']); assert.equal(h.timers.size, 1);
+  h.advance(7999); assert.deepEqual(h.resets, []); h.advance(1); assert.deepEqual(h.resets, [widget.id]);
+  widget.callbacks['error-callback'](); h.advance(1000); h.proof('recovered-proof'); assert.equal(h.timers.size, 0);
+  h.advance(8000); assert.deepEqual(h.resets, [widget.id]); assert.deepEqual(h.tokens, ['recovered-proof']); h.unmount();
+});
+
+test('pausing cancels a scheduled error retry and refreshes once after unpause', () => {
+  const h = fixture({ ready: true }); h.render({ manualRefresh: true }); const widget = h.renders[0];
+  widget.callbacks['error-callback'](); h.advance(1000); h.render({ paused: true }); assert.equal(h.timers.size, 0);
+  h.advance(16000); assert.deepEqual(h.resets, []); h.render({ paused: false });
+  assert.deepEqual(h.resets, [widget.id]); assert.equal(h.renders.length, 1); h.unmount();
+});
+
+for (const unmount of [false, true]) test('manual retry timer and callbacks cannot revive a ' + (unmount ? 'unmounted' : 'deactivated') + ' widget', () => {
+  const h = fixture({ ready: true }); h.render({ manualRefresh: true }); const old = h.renders[0];
+  old.callbacks['error-callback'](); const queued = [...h.timers.values()][0].fn;
+  if (unmount) h.unmount(); else h.render({ active: false });
+  assert.equal(h.timers.size, 0); queued(); old.callbacks['error-callback'](); old.callbacks['expired-callback'](); h.proof('stale-proof', old);
+  assert.deepEqual(h.resets, []); assert.deepEqual(h.tokens, []); assert.deepEqual(h.errors, ['error']); assert.deepEqual(h.expired, []);
+  if (!unmount) h.unmount();
+});
+
+
+for (const ready of [false, true]) test('first provider render waits through an initial pause and resumes without redundant reset: ready=' + ready, () => {
+  const h = fixture({ ready }); h.render({ manualRefresh: true, paused: true });
+  if (!ready) { h.providerReady(); h.poll(); }
+  assert.equal(h.renders.length, 0); assert.deepEqual(h.resets, []);
+  h.render({ resetKey: 1 }); h.render({ paused: false }); h.render();
+  assert.equal(h.renders.length, 1); assert.deepEqual(h.resets, []); assert.deepEqual(h.expired, []);
+  h.proof('first-proof'); assert.deepEqual(h.tokens, ['first-proof']); h.unmount();
+});
+
+test('manual reset clears parent proof before provider reset, including a proof delivered just before the effect', () => {
+  const h = fixture({ ready: true }); let parentProof: string | null = null;
+  h.render({ manualRefresh: true, onToken: (value: string) => { parentProof = value; }, onExpire: () => {
+    assert.deepEqual(h.resets, [], 'parent proof cleared before provider reset'); parentProof = null;
+  } });
+  h.proof('just-delivered-proof'); assert.equal(parentProof, 'just-delivered-proof'); h.render({ resetKey: 1 });
+  assert.equal(parentProof, null); assert.deepEqual(h.resets, ['widget-1']); h.unmount();
 });
