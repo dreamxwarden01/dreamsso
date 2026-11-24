@@ -133,18 +133,7 @@ export function generateInviteCode(): string {
   return Array.from({length:12},()=> 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[crypto.randomInt(36)]).join('');
 }
 
-// A live pending registration reserves its address system-wide: admin
-// user-create/edit and self-service email changes treat it as taken.
-export async function pendingEmailExists(email: string): Promise<boolean> {
-  return (await redis.exists(`reg:pending:${email.toLowerCase()}`)) === 1;
-}
-
-// The whole reservation family: registration pendings + pending email
-// CHANGES both hold their target address against every uniqueness check.
-export async function emailReserved(email: string): Promise<boolean> {
-  const { changePendingForAddress } = await import('./emailChange.js');
-  return (await pendingEmailExists(email)) || (await changePendingForAddress(email));
-}
+// Pending verification records are proofs, not global address reservations.
 
 // Invitation records and their immutable email bindings are retained permanently.
 // Only expired private delivery material and short-lived completion receipts are pruned.

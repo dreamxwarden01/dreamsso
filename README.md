@@ -75,7 +75,9 @@ under `scripts/` may require a separately configured test instance.
 The account portal's Organization area manages single-use invitations with a role,
 optional recipient email and a short note. Choose **Email invitation** or **Copy link /
 invitation code**. Invitations default to 72 hours; the portal offers 24-hour, 3-day,
-and 7-day presets. A shared link still requires mailbox verification.
+and 7-day presets. A shared link still requires mailbox verification. New invitations to already
+registered addresses are rejected. Multiple invitations to an unregistered
+address can coexist; accounts retain unique email addresses and usernames.
 
 An email supplied at creation is fixed. Otherwise, the first accepted registration-email
 request binds the invitation to that address; changing it requires a new invitation.

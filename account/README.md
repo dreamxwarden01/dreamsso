@@ -57,9 +57,18 @@ pre-registered). Cookies are non-secure here (plain http) — handled automatica
 
 ## Invitations
 
+Email changes keep the current address active until verification succeeds. Each
+account has one current verification request, with a fixed 30-minute deadline;
+resending does not extend it. Starting a newer request, cancellation, or changing
+the account’s email or security state invalidates earlier links. A successful
+confirmation can be retried without applying the change twice.
+
 Organization → Invitations supports direct email invitations and shareable links or
 codes, with an offered role, optional email and a note of up to 60 characters.
 The default validity is 72 hours, with 24-hour, 3-day and 7-day presets.
+An address already registered to an account is rejected before a new invitation
+is created or sent. Multiple invitations may target an unregistered address;
+they do not reserve it against registration or account email changes.
 An optional creation email is fixed; an unbound invitation binds to the address
 used for its first accepted registration-email request. A different address is rejected
 on that form. The emailed verification link then opens a read-only address field.

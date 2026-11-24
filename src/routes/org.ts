@@ -27,7 +27,7 @@ import { loginAuthOptions, verifyLoginAssertion } from '../webauthn.js';
 import { sendEmail } from '../email.js';
 import { renderPasswordResetEmail, renderPasswordChangedEmail } from '../emailTemplates.js';
 import { issueResetToken, resetTokenValidityMinutes } from '../passwordReset.js';
-import { emailReserved } from '../registration.js';
+import { identityConflict } from '../identityConflicts.js';
 import { InvitationError, invalidateIneligibleInvitations, createInvitation, requestInvitationResend, revokeInvitation, readInvitation, listInvitations, lockInvitation, serializeInvitation } from '../invitations.js';
 import { queueInvitationMail } from '../invitationMail.js';
 import { passwordComplexityOk } from './security.js';
@@ -328,13 +328,11 @@ orgRouter.post('/account/org/users', scoped, requirePerm('org.users.create'), re
         WHERE deleted_at IS NULL AND (username = $1 OR ($2 <> '' AND email = $2))`,
       [username, email],
     );
-    // A live pending registration OR pending email change reserves its
-    // address (user rule) — an admin-created account must not collide.
-    const pendingHit = email !== '' && (await emailReserved(email));
-    if (dup.length || pendingHit) {
+    // Pending proofs and invitations do not reserve an address globally.
+    if (dup.length) {
       const dupErrs: Record<string, string> = {};
       if (dup.some((d) => d.u)) dupErrs.username = 'Already taken';
-      if (dup.some((d) => d.e) || pendingHit) dupErrs.email = 'Already in use';
+      if (dup.some((d) => d.e)) dupErrs.email = 'Already in use';
       return res.status(409).json({ errors: dupErrs });
     }
 
@@ -437,7 +435,7 @@ orgRouter.patch('/account/org/users/:sub', scoped, requireFreshStepup, async (re
     if (v) {
       const { rows } = await pool.query(
         'SELECT 1 FROM identities WHERE email = $1 AND sub <> $2 AND deleted_at IS NULL', [v, t.sub]);
-      if (rows.length || (await emailReserved(v))) {
+      if (rows.length) {
         return res.status(409).json({ errors: { email: 'Already in use' } });
       }
     }
@@ -467,14 +465,13 @@ orgRouter.patch('/account/org/users/:sub', scoped, requireFreshStepup, async (re
     }
   }
   try {
-    await pool.query(`UPDATE identities SET ${sets.join(', ')} WHERE sub = $1`, vals);
+    const updated=await pool.query(`UPDATE identities SET ${sets.join(', ')} WHERE sub = $1 AND deleted_at IS NULL`, vals);
+    if(!updated.rowCount)return res.status(404).json({error:'not_found'});
   } catch (e) {
     // TOCTOU: concurrent duplicate past the SELECT — same 409 shape, not a 500.
     if ((e as { code?: string; constraint?: string }).code === '23505') {
-      const c = (e as { constraint?: string }).constraint ?? '';
-      return res.status(409).json({
-        errors: c.includes('email') ? { email: 'Already in use' } : { username: 'Already taken' },
-      });
+      const conflict=identityConflict(e);
+      if(conflict)return res.status(409).json({errors: conflict==='email'?{email:'Already in use'}:{username:'Already taken'}});
     }
     throw e;
   }

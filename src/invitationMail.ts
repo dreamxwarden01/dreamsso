@@ -9,7 +9,7 @@ import { sendEmail, type SendResult } from './email.js';
 import { renderRegistrationEmail } from './emailTemplates.js';
 import { config } from './config.js';
 import { lockRoleWrites } from './rbac/roleChanges.js';
-import { lockInvitation, validateLockedInvitation, InvitationError } from './invitations.js';
+import { lockInvitation, validateLockedInvitation, assertInvitationEmailAvailable, InvitationError } from './invitations.js';
 
 export const invitationProofHash = (token: string): Buffer => crypto.createHash('sha256').update(token).digest();
 export interface MailInvitation { id: string; code: string; bound_email: string | null; expires_at: Date | string }
@@ -26,6 +26,7 @@ export async function queueInvitationMail(db: pg.PoolClient, invite: MailInvitat
     if (prior.invitation_id!==invite.id || prior.email.toLowerCase()!==invite.bound_email.toLowerCase()) throw new InvitationError(409,'request_conflict');
     return {queued:['queued','sending'].includes(prior.state),jobId:prior.job_id,jobState:prior.state};
   }
+  await assertInvitationEmailAvailable(db,invite.bound_email);
   const pending = (await db.query("SELECT id,state FROM invitation_mail_jobs WHERE invitation_id=$1 AND state IN('queued','sending') LIMIT 1", [invite.id])).rows[0];
   if (pending) {
     await db.query('INSERT INTO invitation_mail_requests(actor_key,request_id,invitation_id,email,job_id) VALUES($1,$2,$3,$4,$5)', [actor,request.requestId,invite.id,invite.bound_email,pending.id]);
@@ -81,9 +82,11 @@ async function performInvitationMail(options: MailOptions, jobId: string | null)
         await validateLockedInvitation(db,invite,job.email,false);
         const enabled = (await db.query("SELECT value FROM settings WHERE key='enable_registration'")).rows[0]?.value === 'true';
         if (!enabled) throw Error('closed');
-      } catch {
-        await db.query("UPDATE invitation_mail_jobs SET state='failed',error_code='invitation_unavailable',payload_enc=NULL,finished_at=clock_timestamp() WHERE id=$1", [job.id]);
-        await db.query("UPDATE invitation_codes SET mail_state='failed',mail_error_code='invitation_unavailable',mail_last_at=clock_timestamp() WHERE id=$1", [job.invitation_id]);
+        await assertInvitationEmailAvailable(db,job.email);
+      } catch(error) {
+        const code=error instanceof InvitationError && error.code==='email_taken' ? 'email_taken' : 'invitation_unavailable';
+        await db.query("UPDATE invitation_mail_jobs SET state='failed',error_code=$2,payload_enc=NULL,finished_at=clock_timestamp() WHERE id=$1", [job.id,code]);
+        await db.query("UPDATE invitation_codes SET mail_state='failed',mail_error_code=$2,mail_last_at=clock_timestamp() WHERE id=$1", [job.invitation_id,code]);
         job = null;
       }
       if (job) {

@@ -310,16 +310,20 @@ apiRouter.get('/api/email-change', requireSession, (req: AuthedRequest, res) =>
   forwardOrg(req, res, 'GET', '/account/email-change'),
 );
 apiRouter.post('/api/email-change/start', requireSession, (req: AuthedRequest, res) =>
-  forwardOrg(req, res, 'POST', '/account/email-change/start', req.body ?? {}),
+  forwardOrg(req, res, 'POST', '/account/email-change/start', {
+    new_email: req.body?.new_email, request_id: req.body?.request_id, expected_revision: req.body?.expected_revision,
+  }),
 );
 apiRouter.post('/api/email-change/resend', requireSession, (req: AuthedRequest, res) =>
-  forwardOrg(req, res, 'POST', '/account/email-change/resend', {}),
+  forwardOrg(req, res, 'POST', '/account/email-change/resend', { request_id: req.body?.request_id }),
 );
 apiRouter.delete('/api/email-change', requireSession, (req: AuthedRequest, res) =>
-  forwardOrg(req, res, 'DELETE', '/account/email-change'),
+  forwardOrg(req, res, 'DELETE', '/account/email-change', { request_id: req.body?.request_id }),
 );
 apiRouter.post('/api/email/verify/send', requireSession, (req: AuthedRequest, res) =>
-  forwardOrg(req, res, 'POST', '/account/email/verify/send', {}),
+  forwardOrg(req, res, 'POST', '/account/email/verify/send', {
+    request_id: req.body?.request_id, expected_revision: req.body?.expected_revision,
+  }),
 );
 apiRouter.post('/api/username-change', requireSession, (req: AuthedRequest, res) =>
   forwardOrg(req, res, 'POST', '/account/username-change', req.body ?? {}),

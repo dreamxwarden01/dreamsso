@@ -12,6 +12,11 @@ export class InvitationError extends Error {
   }
 }
 const fail = (status: number, code: string, extra?: Record<string, unknown>): never => { throw new InvitationError(status, code, extra); };
+/** Invitation bindings are not reservations; only an existing identity occupies an address. */
+export async function assertInvitationEmailAvailable(db: Pick<pg.PoolClient,'query'>, email: string | null): Promise<void> {
+  if(email && (await db.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount)
+    fail(422,'email_taken',{errors:{email:'email_taken'}});
+}
 export interface InviteRow {
   id: string; code: string; created_by: string | null; created_by_label: string;
   created_at: Date | string; expires_at: Date | string; invited_role_slug: string | null;
@@ -201,6 +206,7 @@ export async function createInvitation(db: pg.PoolClient, actorSub: string, raw:
   if (previous) return {invitation:previous,replayed:true};
   const role = (await db.query('SELECT slug,label,level FROM org_roles WHERE slug=$1',[input.role_slug])).rows[0];
   if (!role || role.level <= a.level) return fail(422,'invalid_role');
+  await assertInvitationEmailAvailable(db,input.email);
   const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   for (let attempt=0;attempt<5;attempt++) {
     const code=Array.from({length:12},()=>chars[randomInt(chars.length)]).join('');
@@ -225,6 +231,7 @@ export async function requestInvitationResend(db: pg.PoolClient, actorSub: strin
   if(!row.bound_email)return fail(422,'email_required');
   const role=(await db.query('SELECT level FROM org_roles WHERE slug=$1',[row.invited_role_slug])).rows[0];
   if(!role || role.level<=a.level)return fail(403,'permission_denied',{permission:'org.invites.create'});
+  await assertInvitationEmailAvailable(db,row.bound_email);
   await record(db,a,rid,'resend',input,row);await audit(db,a,'invite.resend',row);
   return{invitation:await decorate(db,a,row),replayed:false};
 }

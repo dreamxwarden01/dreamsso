@@ -9,14 +9,21 @@ import { verifyEmail } from '../api.js';
 // commits server-side on load; this page only reports the outcome.
 export default function VerifyEmailPage() {
   const [params] = useSearchParams();
-  const [phase, setPhase] = useState('working'); // working | changed | confirmed | invalid | taken
+  const token = params.get('token') || '';
+  const [phase, setPhase] = useState('working'); // working | changed | confirmed | invalid | taken | unavailable
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     let alive = true;
-    verifyEmail(params.get('token') || '')
+    setPhase('working');
+    verifyEmail(token)
       .then((d) => { if (alive) setPhase(d?.kind === 'confirm' ? 'confirmed' : 'changed'); })
-      .catch((e) => { if (alive) setPhase(e.code === 'email_taken' ? 'taken' : 'invalid'); });
+      .catch((e) => {
+        if (!alive) return;
+        const temporary = e.status >= 500 || e.status === 429 || e.status === 0 || ['network', 'timeout', 'network_error', 'request_timeout', 'upstream_timeout', 'upstream_unreachable'].includes(e.code);
+        setPhase(e.code === 'email_taken' ? 'taken' : temporary ? 'unavailable' : 'invalid');
+      });
     return () => { alive = false; };
-  }, [params]);
+  }, [token, retry]);
 
   if (phase === 'working') {
     return (
@@ -33,6 +40,17 @@ export default function VerifyEmailPage() {
           This verification link is invalid, has expired, or was already used.
           Start the change again from your profile to get a fresh one.
         </p>
+        <a className="auth-btn" style={{ display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box', marginTop: 14 }} href="/">
+          Open the account portal
+        </a>
+      </AuthCard>
+    );
+  }
+  if (phase === 'unavailable') {
+    return (
+      <AuthCard docTitle="Verify email" title="Verification unavailable">
+        <p className="auth-msg">We couldn’t confirm your email right now. Retry this same verification link.</p>
+        <button className="auth-btn" type="button" onClick={() => setRetry(value => value + 1)}>Retry</button>
         <a className="auth-btn" style={{ display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box', marginTop: 14 }} href="/">
           Open the account portal
         </a>

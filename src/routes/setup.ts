@@ -1,6 +1,7 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
+import { identityConflict } from '../identityConflicts.js';
 import { isSetupComplete, isSetupConfigured } from '../setup/state.js';
 import { verifySetupToken } from '../setup/token.js';
 import { renderUnavailablePage } from '../views.js';
@@ -180,11 +181,14 @@ setupRouter.post('/setup/finish', async (req, res) => {
     });
     res.status(204).end(); // the wizard navigates to /admin (now unlocked)
   } catch (err) {
-    if ((err as { code?: string }).code === '23505') {
-      res.status(422).json({ errors: { username: 'That username is already taken.' } });
+    const conflict = identityConflict(err);
+    if (conflict) {
+      res.status(422).json({ errors: conflict === 'email'
+        ? { email: 'That email address is already in use.' }
+        : { username: 'That username is already taken.' } });
       return;
     }
-    console.error('setup/finish failed:', err);
-    res.status(500).json({ error: 'setup_failed', message: (err as Error).message });
+    console.warn('setup_finish_failed');
+    res.status(500).json({ error: 'setup_failed' });
   }
 });

@@ -19,12 +19,12 @@ import {
   reserveRegistrationSend, releaseRegistrationSend,
   registrationLinkValidityMinutes, CODE_RE,
 } from '../registration.js';
-import { changePendingForAddress } from '../emailChange.js';
 
 import { withRoleTransaction } from '../rbac/roleChanges.js';
 import { lockInvitation, validateLockedInvitation, readInvitationPreview, InvitationError } from '../invitations.js';
 import { queueInvitationMail, dispatchInvitationMailJob, trackInvitationMailWork, readInvitationProof, invitationProofHash } from '../invitationMail.js';
 import { commitRegistration } from '../registrationStore.js';
+import { identityConflict } from '../identityConflicts.js';
 
 export const registerRouter = Router();
 const siteName = async () => (await getSetting('site_name', 'DreamSSO'))!;
@@ -87,7 +87,7 @@ registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>
           const row=await lockInvitation(db,code);if(!row)throw new InvitationError(422,'invalid_invitation');
           await validateLockedInvitation(db,row,email,false);
           if(!EMAIL_RE.test(email)||email.length>254)throw new InvitationError(422,'invalid_email');
-          if((await db.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount || await changePendingForAddress(email))
+          if((await db.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount)
             throw new InvitationError(422,'email_taken');
           await validateLockedInvitation(db,row,email,true);
           const locked=(await lockInvitation(db,code))!;
@@ -116,7 +116,7 @@ registerRouter.post('/internal/register/start',async(req:Request,res:Response)=>
 
   // Open registration retains its short email-verification flow; invitations use the durable queue above.
   if(!EMAIL_RE.test(email)||email.length>254)return res.status(422).json({errors:{email:'invalid_email'}});
-  if((await pool.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount||await changePendingForAddress(email))
+  if((await pool.query('SELECT 1 FROM identities WHERE email=$1 AND deleted_at IS NULL',[email])).rowCount)
     return res.status(422).json({errors:{email:'email_taken'}});
   const [from,account,configured]=await Promise.all([getSetting('mail_from'),getSetting('cf_account_id'),hasSetting('cf_api_token')]);
   if(!from||!account||!configured)return res.status(503).json({error:'email_not_configured'});
@@ -191,11 +191,8 @@ registerRouter.post('/internal/register/complete',async(req:Request,res:Response
     await db.query('COMMIT');
   }catch(error){
     await db.query('ROLLBACK').catch(()=>{});
-    if((error as {code?:string}).code==='23505'){
-      const duplicates=(await pool.query('SELECT username=$1 AS u,email=$2 AS e FROM identities WHERE deleted_at IS NULL AND (username=$1 OR email=$2)',[username,email])).rows;
-      for(const duplicate of duplicates){if(duplicate.u)errors.username='username_taken';if(duplicate.e)errors.email='email_taken';}
-      return res.status(422).json(Object.keys(errors).length?{errors}:{error:'registration_conflict'});
-    }
+    const conflict=identityConflict(error);
+    if(conflict)return res.status(422).json({errors:{[conflict]:conflict+'_taken'}});
     return fail(res,error);
   }finally{db.release();}
   if(result.replayed)return res.json({already_completed:true,complete_url:`${await portalUrl()}/auth/login`});

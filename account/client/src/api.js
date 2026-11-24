@@ -165,9 +165,9 @@ export const resetConfirm = (body) => reqPublic('/api/reset/confirm', body);
 // --- email verification (verify-then-commit) ---
 export const emailChangeGet = () => req('/api/email-change');
 export const emailChangeStart = (body) => req('/api/email-change/start', { method: 'POST', body: JSON.stringify(body) });
-export const emailChangeResend = () => req('/api/email-change/resend', { method: 'POST', body: '{}' });
-export const emailChangeCancel = () => req('/api/email-change', { method: 'DELETE' });
-export const emailVerifySend = () => req('/api/email/verify/send', { method: 'POST', body: '{}' });
+export const emailChangeResend = (requestId) => req('/api/email-change/resend', { method: 'POST', body: JSON.stringify({ request_id: requestId }) });
+export const emailChangeCancel = (requestId) => req('/api/email-change', { method: 'DELETE', body: JSON.stringify({ request_id: requestId }) });
+export const emailVerifySend = (body) => req('/api/email/verify/send', { method: 'POST', body: JSON.stringify(body) });
 export const usernameChange = (body) => req('/api/username-change', { method: 'POST', body: JSON.stringify(body) });
 export const emailChangeCheck = (newEmail) =>
   req('/api/email-change/check', { method: 'POST', body: JSON.stringify({ new_email: newEmail }) });

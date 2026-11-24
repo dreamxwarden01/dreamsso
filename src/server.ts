@@ -34,6 +34,7 @@ import { resolveSetupState, isSetupComplete } from './setup/state.js';
 import { ensureSetupToken, SETUP_TOKEN_FILE } from './setup/token.js';
 import { startEventPump,stopEventPump,settleEventPump } from './events.js';
 import { sweepInvitations } from './registration.js';
+import { sweepEmailChanges, assertEmailChangeSchema } from './emailChange.js';
 import { drainInvitationMail, stopInvitationMail, settleInvitationMail } from './invitationMail.js';
 import { withRoleTransaction } from './rbac/roleChanges.js';
 import { pool } from './db.js';
@@ -185,6 +186,7 @@ async function main() {
   // configured boot after migration failure instead of serving broken routes.
   // The unconfigured installer branch above still starts without a database.
   await runMigrations({ strict: true });
+  await assertEmailChangeSchema();
   if(lifecycle.stopping)return;
   // Apply current creator/role eligibility to legacy invitations before serving requests.
   await withRoleTransaction(async()=>{});
@@ -196,6 +198,7 @@ async function main() {
   lifecycle.every(cleanExpiredSessions, 60 * 60 * 1000);
   // Retain invitation history; prune only expired private registration material.
   lifecycle.every(sweepInvitations, 60 * 60 * 1000);
+  lifecycle.every(sweepEmailChanges, 60 * 60 * 1000);
   let mailRunning=false;
   lifecycle.every(async()=>{if(mailRunning)return;mailRunning=true;try{await drainInvitationMail();}finally{mailRunning=false;}}, 2000);
   startEventPump(); // boot drain + 60s retry sweep + archive pruning

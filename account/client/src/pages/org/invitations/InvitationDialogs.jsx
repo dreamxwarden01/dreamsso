@@ -63,7 +63,9 @@ export function CreateInvitationDialog({ actor, initialForm, onClose, onCreate }
     } catch (e) {
       if (!mounted.current) return;
       locked.current = false; setBusy(false); feedback.finish('fail');
-      setError(e.code === 'request_storage_unavailable' ? 'This tab could not retain the request. Allow session storage, then try again.' : invitationError(e));
+      if (e.code === 'email_taken' || e.data?.errors?.email === 'email_taken') {
+        setEmailError('This email address is already registered.'); emailInput.current?.focus();
+      } else setError(e.code === 'request_storage_unavailable' ? 'This tab could not retain the request. Allow session storage, then try again.' : invitationError(e));
     }
   };
   const field = (label, control, hint, tag) => { const controlId = id + '-' + label.toLowerCase().replace(/\s+/g, '-'); return <div className="iv-field"><label className="iv-flabel" htmlFor={controlId}><span>{label}</span>{tag && <span className="iv-ftag">{tag}</span>}</label>{cloneElement(control, { id: controlId })}{hint && <span className="iv-fhint">{hint}</span>}</div>; };

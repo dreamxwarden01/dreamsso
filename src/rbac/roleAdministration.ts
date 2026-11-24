@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { identityConflict } from '../identityConflicts.js';
 import { PERM_KEYS } from './catalog.js';
 import { resolveAuthz } from './index.js';
 import { appRoleLevel, effectiveAppRole } from './appRoles.js';
@@ -256,10 +257,8 @@ export async function createOrgUser(db: pg.PoolClient, actorSub: string, input: 
       VALUES($1,$2,$3,NULLIF($4,''),$4<>'',$5,now())`,
     [input.sub, input.username, input.displayName, input.email, input.passwordHash]);
   } catch (error) {
-    if ((error as { code?: string }).code === '23505') {
-      const constraint = (error as { constraint?: string }).constraint ?? '';
-      return fieldError(409, constraint.includes('email') ? { email: 'Already in use' } : { username: 'Already taken' });
-    }
+    const conflict = identityConflict(error);
+    if (conflict) return fieldError(409, conflict === 'email' ? { email: 'Already in use' } : { username: 'Already taken' });
     throw error;
   }
   await db.query('INSERT INTO user_org_roles(user_sub,org_role_slug) VALUES($1,$2)', [input.sub, role.slug]);
