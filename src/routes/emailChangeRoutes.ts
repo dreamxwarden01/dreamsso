@@ -97,7 +97,7 @@ async function mailConfigured(){
 async function sendChangeEmail(res:Response,op:Awaited<ReturnType<typeof issueEmailChange>>){
   const [site,portal]=await Promise.all([siteName(),portalUrl()]);
   const sent=await sendEmail({to:op.newEmail,...renderEmailVerifyEmail({siteName:site,kind:op.kind,
-    link:`${portal}/verify-email?token=${op.token}`,minutes:Math.max(1,Math.ceil((Date.parse(op.expiresAt)-Date.now())/60000))})});
+    link:`${portal}/verify-email?token=${op.token}`,expiresAt:op.expiresAt})});
   if(!sent.ok){
     if(!['unreachable','unknown'].includes(sent.reason))await releaseRegistrationSend(op.newEmail);
     return res.status(503).json({error:['unreachable','unknown'].includes(sent.reason)?'send_unconfirmed':'send_failed',

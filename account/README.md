@@ -101,3 +101,13 @@ Email-proof validation and token-gated username checks do not require an extra c
 The SSO atomically creates the account, assigns its role and consumes the invitation.
 After completion, the browser follows the returned sign-in URL; a confirmed retry
 can use normal sign-in without creating another account.
+The success screen no longer holds a button for two seconds before navigating.
+SSO tolerates a repeated welcome hop only with the same already-authenticated
+session and a short-lived, session-bound receipt; genuinely unusable links are
+still rejected.
+
+Invitation and registration emails use distinct subjects and actions. Their short
+validity hint is relative to sending time, with the remaining lifetime recalculated
+on resend. It is an approximation for the reader, not a change to the strict
+server-side expiration. The shared email layout also covers verification, reset
+and security notifications, without duplicate footer notices or remote assets.

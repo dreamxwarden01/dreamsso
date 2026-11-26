@@ -21,6 +21,8 @@ export default function RegisterCompletePage() {
   const queryEmail = (params.get('email') || '').trim();
   const [registration, setRegistration] = useState(null);
   const [accountCreated, setAccountCreated] = useState(false);
+  const [handoff, setHandoff] = useState(null);
+  const navigatedHandoff = useRef(null);
   const [notice, setNotice] = useState(null);
   const [now, setNow] = useState(Date.now());
   const email = registration?.bound_email || registration?.email || queryEmail;
@@ -52,7 +54,7 @@ export default function RegisterCompletePage() {
   useEffect(() => {
     let alive = true;
     checkSeq.current++; feedback.reset();
-    setPhase('loading'); setNotice(null); setRegistration(null); setAccountCreated(false);
+    setPhase('loading'); setNotice(null); setRegistration(null); setAccountCreated(false); setHandoff(null);
     setUsername(''); setDisplayName(''); setPw(''); setConfirm('');
     setUserErr(null); setNameErr(null); setPwBad(false); setCfErr(null); setFormErr(null);
     if (!queryEmail || !token) { setNotice('link'); setPhase('invalid'); return undefined; }
@@ -75,10 +77,18 @@ export default function RegisterCompletePage() {
     return () => { alive = false; checkSeq.current++; };
   }, [queryEmail, token, validationAttempt]);
 
+  // Commit the successful screen before navigating. The one-use welcome URL
+  // is followed once, without keeping a success button visible for two seconds.
+  useEffect(() => {
+    if (phase !== 'redirect' || !handoff || handoff.context !== proofContext || navigatedHandoff.current === handoff) return;
+    navigatedHandoff.current = handoff;
+    window.location.replace(handoff.url);
+  }, [phase, handoff, proofContext]);
+
   const nameOk = displayName.trim().length > 0 && displayName.trim().length <= 100;
   const pwOk = passwordValid(pw) && !/\s/.test(pw);
   const canSubmit =
-    !busy && USERNAME_RE.test(username) && !userErr && nameOk && pwOk &&
+    phase === 'form' && !accountCreated && !busy && USERNAME_RE.test(username) && !userErr && nameOk && pwOk &&
     confirm.length > 0 && confirm === pw && (!turnstileSiteKey || turnstileToken);
 
   const checkAvailability = async () => {
@@ -108,11 +118,8 @@ export default function RegisterCompletePage() {
       if (!mounted.current || operationContext !== proofContextRef.current) return;
       if (typeof d?.complete_url !== 'string' || !d.complete_url) throw new Error('missing_complete_url');
       setAccountCreated(true);
-      feedback.finish('done', () => {
-        if (operationContext !== proofContextRef.current) return;
-        setPhase('redirect');
-        window.location.replace(d.complete_url);
-      });
+      setHandoff({ context: operationContext, url: d.complete_url });
+      setPhase('redirect');
     } catch (err) {
       if (!mounted.current || operationContext !== proofContextRef.current) return;
       feedback.finish('fail');

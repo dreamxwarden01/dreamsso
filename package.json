@@ -19,7 +19,7 @@
     "test:shutdown": "node --import tsx --test tests/service-lifecycle.test.ts",
     "test:auth-ui": "node --import tsx --test tests/auth-motion.test.ts tests/auth-pages.test.ts tests/auth-native-motion.test.ts tests/branding.test.ts tests/auth-card-motion.test.ts",
     "test:auth-security": "node --import tsx --test tests/sso-auth-boundary.test.ts tests/code-redemption.test.ts tests/account-security.test.ts tests/account-security-callback.test.ts tests/account-logout-receiver.test.ts tests/account-assertion-issuer.test.ts tests/auth-client-assertion.test.ts tests/auth-client-assertion-routes.test.ts tests/auth-bearer-liveness.test.ts tests/auth-manual-assertions.test.ts tests/current-session-context.test.ts",
-    "test:invitations": "node --import tsx --test tests/identity-conflicts.test.ts tests/email-operation-client.test.ts tests/registration-recipient.test.ts tests/turnstile-lifecycle.test.ts tests/registration-turnstile-gate.test.ts tests/email-delivery.test.ts tests/public-invitation.test.ts tests/registration-privacy.test.ts tests/invitation-transport.test.ts account/client/src/pages/org/invitations/*.test.js"
+    "test:invitations": "node --import tsx --test tests/email-templates.test.ts tests/registration-handoff.test.ts tests/identity-conflicts.test.ts tests/email-operation-client.test.ts tests/registration-recipient.test.ts tests/turnstile-lifecycle.test.ts tests/registration-turnstile-gate.test.ts tests/email-delivery.test.ts tests/public-invitation.test.ts tests/registration-privacy.test.ts tests/invitation-transport.test.ts account/client/src/pages/org/invitations/*.test.js"
   },
   "dependencies": {
     "@peculiar/x509": "^2.0.0",

@@ -104,7 +104,8 @@ async function performInvitationMail(options: MailOptions, jobId: string | null)
     const token = openSecret(job.payload_enc);
     const [site,portal] = await Promise.all([getSetting('site_name','DreamSSO'),getSetting('account_portal_url',config.accountPortalUrl)]);
     const link = `${portal}/register/complete?email=${encodeURIComponent(job.email)}&token=${token}`;
-    result = await deliver({ to:job.email,...renderRegistrationEmail({siteName:site!,link,expiresAt:new Date(job.expires_at).toISOString()}) });
+    result = await deliver({ to:job.email,...renderRegistrationEmail({siteName:site!,link,expiresAt:new Date(job.expires_at).toISOString(),
+      origin:typeof job.actor_key==='string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(job.actor_key) ? 'admin' : 'public'}) });
   } catch { result = {ok:false,reason:'unreachable'}; }
   const state = result.ok ? 'sent' : ['unreachable','unknown'].includes(result.reason) ? 'unknown' : 'failed';
   const code = result.ok ? null : state === 'unknown' ? 'delivery_unknown' : ['not_configured','email_not_configured'].includes(result.reason) ? 'email_not_configured' : ['bounced','rejected'].includes(result.reason)?result.reason:'send_failed';

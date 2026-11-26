@@ -5,7 +5,7 @@ import { uuidv7 } from 'uuidv7';
 import { pool } from '../db.js';
 import { config } from '../config.js';
 import { getSetting, hasSetting } from '../settings.js';
-import { createSession, clientGeo } from '../oidc/sessions.js';
+import { createSession, loadSession, clientGeo } from '../oidc/sessions.js';
 import { createTxn } from '../oidc/transactions.js';
 import { sendEmail } from '../email.js';
 import { renderRegistrationEmail } from '../emailTemplates.js';
@@ -25,6 +25,7 @@ import { lockInvitation, validateLockedInvitation, readInvitationPreview, Invita
 import { queueInvitationMail, dispatchInvitationMailJob, trackInvitationMailWork, readInvitationProof, invitationProofHash } from '../invitationMail.js';
 import { commitRegistration } from '../registrationStore.js';
 import { identityConflict } from '../identityConflicts.js';
+import { rememberRegistrationHandoff, readRegistrationHandoff } from '../registrationHandoff.js';
 
 export const registerRouter = Router();
 const siteName = async () => (await getSetting('site_name', 'DreamSSO'))!;
@@ -60,7 +61,7 @@ async function proofFor(email:string,token:string,includeExpired=false) {
   if(modern) return {code:modern.code,expiresAt:new Date(modern.expires_at),modern:true};
   const old = await validatePending(email,token);
   if(!old) return null;
-  return {code:old.code,expiresAt:new Date((old.createdAt+30*60)*1000),modern:false};
+  return {code:old.code,expiresAt:new Date((old.createdAt+registrationLinkValidityMinutes*60)*1000),modern:false};
 }
 
 // Retired: an invitation code is not a capability to inspect recipient details.
@@ -208,11 +209,29 @@ registerRouter.post('/internal/register/complete',async(req:Request,res:Response
 // GET /welcome?ticket= — the browser hop that turns a finished registration
 // into a signed-in user; the same machinery as /reset/complete with
 // registration-appropriate copy on a dead ticket.
+// Express otherwise dispatches HEAD through GET, consuming a one-time ticket.
+registerRouter.head('/welcome', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(204).end();
+});
 registerRouter.get('/welcome', async (req: Request, res: Response) => {
-  const ticket = await redeemLoginTicket(qstr(req.query.ticket));
+  res.setHeader('Cache-Control', 'no-store');
+  const rawTicket = qstr(req.query.ticket);
+  const ticket = await redeemLoginTicket(rawTicket);
   const site = await siteName();
   const portal = await portalUrl();
   if (!ticket) {
+    const receipt = await readRegistrationHandoff(rawTicket);
+    if (receipt) {
+      const session = await loadSession(req);
+      if (session?.sid === receipt.sid && session.userSub === receipt.sub) {
+        // Only resume ordinary portal navigation. Do not mint another session,
+        // reuse a consumed KMSI transaction, or refresh the receipt deadline.
+        return res.redirect(`${portal}/auth/login`);
+      }
+      // Diagnose a replay without logging the ticket, cookie or identity.
+      console.warn(session ? 'registration_handoff_session_mismatch' : 'registration_handoff_session_missing');
+    }
     const nonce = crypto.randomBytes(16).toString('base64');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader(
@@ -244,5 +263,7 @@ registerRouter.get('/welcome', async (req: Request, res: Response) => {
       amr: ticket.amr, acr: ticket.acr, authTime: Math.floor(Date.now() / 1000),
     },
   });
+  try { await rememberRegistrationHandoff(rawTicket, { sid, sub: ticket.sub }); }
+  catch { console.warn('registration_handoff_receipt_unavailable'); }
   res.redirect(`/login?txn=${encodeURIComponent(txnId)}`);
 });

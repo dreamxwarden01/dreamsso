@@ -93,6 +93,20 @@ invitation. Management requests use request IDs so a response retry does not cre
 a second invitation or queue a second send. Registration email requests wait for the
 provider result; an unconfirmed request can be retried with its existing ID.
 
+Administrator-initiated mail explicitly presents an invitation; recipient-requested
+mail presents the next registration step. The durable mail job determines this
+wording. Templates share one action, mobile-readable inline styles and a single
+footer. Expiry is a short approximate duration at sending time (for example,
+“about 3 days” or “about 53 hours”), calculated from the original deadline on a
+resend. Mail contains no absolute UTC timestamp or explanation of resend rules;
+the backend continues to enforce the exact deadline.
+
+The successful registration handoff navigates immediately. A duplicate welcome
+request can continue for 60 seconds only when its hashed-ticket receipt matches
+the exact live SSO session and subject created by the first redemption. It does
+not authenticate a second time or refresh the receipt. Missing, revoked or
+mismatched sessions still fail closed; HEAD never consumes a sign-in ticket.
+
 The list provides All, Current and History views, server-side search and sorting,
 and pages of 10, 25 or 100 records. Used, expired, revoked and invalid invitations
 remain in history. Invitation IDs and codes can be displayed; mailbox verification

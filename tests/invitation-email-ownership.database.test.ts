@@ -52,6 +52,19 @@ test('registered email ownership gates new invitation work without reserving unr
   for(const key of ['org.invites.create','org.invites.view'])await pool.query("INSERT INTO role_permissions VALUES('manager',$1,'grant')",[key]);
   await pool.query("INSERT INTO settings(key,value) VALUES('enable_registration','true')");
 
+  await t.test('mail copy follows the durable job initiator, not the invitation delivery setting',async()=>{
+   for(const actorSub of [owner,null]){
+    const email=mailbox(),invitation=await create(email);
+    const queued=await tx(db=>queueInvitationMail(db,invitation,{actorSub,requestId:randomUUID()}));
+    let message:any;
+    const result=await dispatchInvitationMailJob(queued.jobId!,{database:pool,deadline:Date.now()+2000,send:async args=>{message=args;return {ok:true};}});
+    assert.equal(result?.state,'sent');assert.equal(message.to,email);
+    if(actorSub){assert.match(message.subject,/You're invited to join/);assert.match(message.html,/Accept invitation/);}
+    else {assert.match(message.subject,/Finish creating/);assert.doesNotMatch(message.text,/administrator/);}
+    assert.doesNotMatch(message.text,/resending|UTC|GMT/i);
+   }
+  });
+
   await t.test('active, disabled and locked registered mailboxes reject both bound delivery modes without records or quota',async()=>{
    for(const status of ['active','disabled','locked']){
     const email=mailbox();await account(email,status);const before=await snapshot(email);

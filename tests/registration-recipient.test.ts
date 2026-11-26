@@ -608,15 +608,18 @@ test('two immediate form submits share the one in-flight operation', async () =>
   await Promise.all([first, second]); await h.flush(); assert.equal(h.nodes(node => node.type === 'form').length, 0); h.unmount();
 });
 
-test('registration link validates without Turnstile and final submit preserves password fields and the welcome ticket hop', async () => {
+test('registration link validates without Turnstile and success immediately renders its one-time welcome handoff', async () => {
   const h = clientFixture('complete'); await h.flush();
   assert.deepEqual(h.calls.map(call => call.name), ['registerValidate']); assert.equal(h.field('recipient-email').props.readOnly, true);
   await h.input('reg-username', 'alex_demo'); await h.input('reg-name', 'Alex Demo'); await h.input('reg-pw', 'Synthetic1!'); await h.input('reg-cf', 'Synthetic1!');
   await h.submit(); const call = h.calls.find(call => call.name === 'registerComplete');
   assert.equal(call.args[0].email, 'alex@example.test'); assert.equal(call.args[0].token, 'synthetic-proof');
   assert.equal(call.args[0].password, 'Synthetic1!'); assert.equal(call.args[0].confirm_password, 'Synthetic1!');
-  assert.equal(h.redirects.length, 0); await h.advance(1999); assert.equal(h.redirects.length, 0);
-  await h.advance(1); assert.deepEqual(h.redirects, ['/welcome?ticket=synthetic-ticket']); h.unmount();
+  assert.deepEqual(h.redirects, ['/welcome?ticket=synthetic-ticket']);
+  assert.match(h.text(), /Account created/); assert.match(h.text(), /Signing you in/);
+  assert.equal(h.nodes(node => node.type === 'form').length, 0);
+  assert.equal(h.finishCallbacks.length, 0);
+  await h.advance(2000); assert.deepEqual(h.redirects, ['/welcome?ticket=synthetic-ticket']); h.unmount();
 });
 
 test('stale username availability responses cannot reject a newer username', async () => {
@@ -657,13 +660,43 @@ test('final account submit requires its own current human proof when configured'
   assert.equal(h.calls.find(call => call.name === 'registerComplete').args[0].turnstile_token, 'synthetic-final-human-proof'); h.unmount();
 });
 
-test('a completed account is not relabeled expired during the two-second success feedback', async () => {
+test('completed account remains successful through its old proof deadline while navigation is pending', async () => {
   const h = clientFixture('complete', { api: { registerValidate: async () => ({ email: 'alex@example.test', bound_email: 'alex@example.test',
     expires_at: new Date(now + 1000).toISOString(), invitation: invitation({ bound_email: 'alex@example.test', expires_at: new Date(now + 1000).toISOString() }) }) } });
   await h.flush(); await h.input('reg-username', 'alex_demo'); await h.input('reg-name', 'Alex Demo');
   await h.input('reg-pw', 'Synthetic1!'); await h.input('reg-cf', 'Synthetic1!'); await h.submit();
   await h.advance(1000); assert.doesNotMatch(h.text(), /has expired/); await h.advance(1000);
   assert.deepEqual(h.redirects, ['/welcome?ticket=synthetic-ticket']); h.unmount();
+});
+
+test('repeated submit events produce only one completed-account navigation', async () => {
+  const result = deferred(); const h = clientFixture('complete', { api: { registerComplete: () => result.promise } });
+  await h.flush(); await h.input('reg-username', 'alex_demo'); await h.input('reg-name', 'Alex Demo');
+  await h.input('reg-pw', 'Synthetic1!'); await h.input('reg-cf', 'Synthetic1!');
+  const form = h.form();
+  const first = form.props.onSubmit({ preventDefault() {} }), second = form.props.onSubmit({ preventDefault() {} });
+  await h.flush(); assert.equal(h.calls.filter(call => call.name === 'registerComplete').length, 1);
+  result.resolve({ complete_url: '/welcome?ticket=synthetic-ticket' }); await Promise.all([first, second]); await h.flush();
+  await form.props.onSubmit({ preventDefault() {} }); await h.advance(5000);
+  assert.equal(h.calls.filter(call => call.name === 'registerComplete').length, 1);
+  assert.deepEqual(h.redirects, ['/welcome?ticket=synthetic-ticket']);
+  assert.match(h.text(), /Account created/); h.unmount();
+});
+
+for (const leave of ['new proof', 'unmount']) test('late completion cannot navigate after ' + leave, async () => {
+  const result = deferred(); const h = clientFixture('complete', { api: { registerComplete: () => result.promise } });
+  await h.flush(); await h.input('reg-username', 'alex_demo'); await h.input('reg-name', 'Alex Demo');
+  await h.input('reg-pw', 'Synthetic1!'); await h.input('reg-cf', 'Synthetic1!');
+  const pending = h.form().props.onSubmit({ preventDefault() {} }); await h.flush();
+  if (leave === 'new proof') await h.setQuery('email=alex%40example.test&token=different-proof');
+  else h.unmount();
+  const updates = h.stateUpdateCount();
+  result.resolve({ complete_url: '/welcome?ticket=old-ceremony-ticket' }); await pending; await h.flush();
+  assert.deepEqual(h.redirects, []); assert.equal(h.stateUpdateCount(), updates);
+  if (leave === 'new proof') {
+    assert.equal(h.calls.filter(call => call.name === 'registerValidate').length, 2);
+    assert.equal(h.nodes(node => node.type === 'form').length, 1); h.unmount();
+  }
 });
 
 test('failed final validation preserves all signup fields and a persistent below-button error', async () => {
