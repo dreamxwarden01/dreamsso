@@ -328,7 +328,12 @@ test('role administration preserves authority ceilings and atomic delivery in is
       const input = { sub: randomUUID(), username: 'created-user', displayName: 'Created user', email: '', passwordHash: 'synthetic-hash', roleSlug: 'candidate' };
       await withRoleTransaction(db => createOrgUser(db, ids.actor, input), database);
       assert.equal((await database.query('SELECT org_role_slug FROM user_org_roles WHERE user_sub=$1', [input.sub])).rows[0].org_role_slug, 'candidate');
-      assert.equal((await events()).rows.length, 0);
+      const createdEvents = (await events()).rows;
+      assert.equal(createdEvents.length, 2);
+      assert.ok(createdEvents.every(event => event.payload.sub === input.sub && event.payload.role_id === 4
+        && event.payload.account_status === 'active'));
+      assert.deepEqual(createdEvents[0].payload.profile, { preferred_username: 'created-user', name: 'Created user',
+        picture: null, email: null, email_verified: false });
       const rejected = { ...input, sub: randomUUID(), username: 'rejected-user', roleSlug: 'administrator' };
       await assert.rejects(withRoleTransaction(db => createOrgUser(db, ids.actor, rejected), database),
         (error: unknown) => error instanceof RoleAccessError && error.status === 422);

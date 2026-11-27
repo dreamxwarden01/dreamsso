@@ -26,6 +26,7 @@ import { queueInvitationMail, dispatchInvitationMailJob, trackInvitationMailWork
 import { commitRegistration } from '../registrationStore.js';
 import { identityConflict } from '../identityConflicts.js';
 import { rememberRegistrationHandoff, readRegistrationHandoff } from '../registrationHandoff.js';
+import { kickDrain } from '../events.js';
 
 export const registerRouter = Router();
 const siteName = async () => (await getSetting('site_name', 'DreamSSO'))!;
@@ -196,6 +197,9 @@ registerRouter.post('/internal/register/complete',async(req:Request,res:Response
     if(conflict)return res.status(422).json({errors:{[conflict]:conflict+'_taken'}});
     return fail(res,error);
   }finally{db.release();}
+  // The durable outbox is committed before delivery starts; the periodic pump
+  // recovers a missed wakeup without duplicating the registration operation.
+  kickDrain();
   if(result.replayed)return res.json({already_completed:true,complete_url:`${await portalUrl()}/auth/login`});
   // Post-commit Redis/ticket failures must not turn an existing account into an unexplained error.
   await dropPending(email).catch(()=>{});

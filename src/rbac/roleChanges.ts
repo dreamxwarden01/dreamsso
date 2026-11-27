@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { pool } from '../db.js';
 import { insertEvents } from '../events/outboxStore.js';
 import { invalidateIneligibleInvitations } from '../invitations.js';
+import { provisioningProfile, type ProvisioningIdentity } from './provisioningProfile.js';
 
 const ROLE_WRITE_LOCK = 1_145_624_915;
 export interface RoleSyncState {
@@ -52,8 +53,7 @@ export async function ensureRoleSyncState(db: pg.PoolClient, clientId: string): 
   return state;
 }
 
-interface EffectiveRow {
-  user_sub: string;
+interface EffectiveRow extends ProvisioningIdentity {
   role_id: number | null;
   managed: boolean;
   known: boolean;
@@ -65,13 +65,17 @@ interface EffectiveRow {
 
 /** The state mutation, authority revision, ledger and delivery intent share one transaction. */
 export async function publishRoleChanges(db: pg.PoolClient, clientIds: string[], subjects?: readonly string[] | null,
-  options: { force?: boolean; forceSubjects?: readonly string[] } = {}): Promise<number> {
+  options: { force?: boolean; forceSubjects?: readonly string[]; allowedOnly?: boolean } = {}): Promise<number> {
   let count = 0;
   const forcedSubjects = new Set(options.forceSubjects ?? []);
   for (const clientId of [...new Set(clientIds)].sort()) {
     const state = await ensureRoleSyncState(db, clientId);
+    const { rows: [client] } = await db.query<{ allowed_scopes: string[] }>(
+      'SELECT allowed_scopes FROM oauth_clients WHERE client_id=$1', [clientId]);
+    if (!client) throw new Error('Role authority client is unavailable.');
     const { rows } = await db.query<EffectiveRow>(`WITH effective AS(
-      SELECT i.sub AS user_sub,CASE WHEN ov.user_sub IS NOT NULL THEN ov.app_role_id
+      SELECT i.sub AS user_sub,i.username::text,i.display_name,i.avatar,i.email::text,i.email_verified,
+        CASE WHEN ov.user_sub IS NOT NULL THEN ov.app_role_id
         WHEN od.role_slug IS NOT NULL THEN od.app_role_id ELSE cat.default_role_id END AS raw_role,
         cat.client_id IS NOT NULL AS managed,
         CASE WHEN i.deleted_at IS NOT NULL THEN 'deleted' ELSE i.status END AS account_status
@@ -82,14 +86,18 @@ export async function publishRoleChanges(db: pg.PoolClient, clientIds: string[],
       WHERE ($2::uuid[] IS NULL OR i.sub=ANY($2::uuid[]))
         AND (i.deleted_at IS NULL OR $2::uuid[] IS NOT NULL OR EXISTS(
           SELECT 1 FROM app_role_effective prior WHERE prior.client_id=$1 AND prior.user_sub=i.sub)))
-      SELECT e.user_sub,r.role_id,e.managed,e.account_status,p.user_sub IS NOT NULL AS known,
+      SELECT e.user_sub,e.username,e.display_name,e.avatar,e.email,e.email_verified,
+        r.role_id,e.managed,e.account_status,p.user_sub IS NOT NULL AS known,
         p.role_id AS previous_role,p.managed AS previous_managed,p.account_status AS previous_account_status
       FROM effective e LEFT JOIN app_roles r ON r.client_id=$1 AND r.role_id=e.raw_role
       LEFT JOIN app_role_effective p ON p.client_id=$1 AND p.user_sub=e.user_sub
       ORDER BY e.user_sub`, [clientId, subjects ? [...new Set(subjects)] : null]);
-    const changed = rows.filter(row => options.force || forcedSubjects.has(row.user_sub)
-      || !row.known || row.role_id !== row.previous_role || row.managed !== row.previous_managed
-      || row.account_status !== row.previous_account_status);
+    // Explicit operator reconciliation can seed existing eligible users without
+    // changing unrelated denied-user snapshots or resetting any queued work.
+    const changed = rows.filter(row => (!options.allowedOnly || row.account_status === 'active' && row.role_id !== null)
+      && (options.force || forcedSubjects.has(row.user_sub)
+        || !row.known || row.role_id !== row.previous_role || row.managed !== row.previous_managed
+        || row.account_status !== row.previous_account_status));
     if (!changed.length) continue;
     const { rows: [advanced] } = await db.query<{ revision: string }>(`UPDATE app_role_sync_state
       SET authority_revision=authority_revision+1 WHERE client_id=$1 AND authority_revision<9223372036854775807
@@ -97,9 +105,14 @@ export async function publishRoleChanges(db: pg.PoolClient, clientIds: string[],
     if (!advanced) throw new Error('Role authority revision is exhausted.');
     for (let offset = 0; offset < changed.length; offset += 100) {
       const part = changed.slice(offset, offset + 100);
-      await insertEvents(db, clientId, part.map(row => ({ type: 'account.roles_change', version: advanced.revision,
-        payload: { sub: row.user_sub, role_id: row.role_id, account_status: row.account_status,
-          authority_epoch: state.authority_epoch, authority_revision: advanced.revision } })));
+      await insertEvents(db, clientId, part.map(row => {
+        const profile = row.account_status === 'active' && row.role_id !== null
+          ? provisioningProfile(row, client.allowed_scopes) : undefined;
+        return { type: 'account.roles_change', version: advanced.revision,
+          payload: { sub: row.user_sub, role_id: row.role_id, account_status: row.account_status,
+            authority_epoch: state.authority_epoch, authority_revision: advanced.revision,
+            ...(profile ? { profile } : {}) } };
+      }));
       await db.query(`INSERT INTO app_role_effective(client_id,user_sub,role_id,managed,account_status,authority_revision)
         SELECT $1,v.user_sub,v.role_id,v.managed,v.account_status,$2::bigint
         FROM jsonb_to_recordset($3::jsonb) AS v(user_sub uuid,role_id integer,managed boolean,account_status text)
@@ -110,4 +123,13 @@ export async function publishRoleChanges(db: pg.PoolClient, clientIds: string[],
     count += changed.length;
   }
   return count;
+}
+
+/** Caller owns the role-write transaction and has inserted identity + membership. */
+export async function publishInitialUserAccess(db: pg.PoolClient, subject: string): Promise<number> {
+  const clients = (await db.query<{ client_id: string }>(
+    'SELECT client_id FROM app_role_catalogs ORDER BY client_id')).rows.map(row => row.client_id);
+  // A newly created identity has no existing RP sessions to revoke. Do not
+  // disclose it to an RP it cannot access; later grants publish normally.
+  return publishRoleChanges(db, clients, [subject], { allowedOnly: true });
 }

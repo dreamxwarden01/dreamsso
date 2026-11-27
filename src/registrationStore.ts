@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { lockRoleWrites } from './rbac/roleChanges.js';
+import { lockRoleWrites, publishInitialUserAccess } from './rbac/roleChanges.js';
 import { lockInvitation, validateLockedInvitation, InvitationError } from './invitations.js';
 import { resolveRegistrationRole } from './registrationRole.js';
 
@@ -46,5 +46,6 @@ export async function commitRegistration(db: pg.PoolClient, input: RegistrationC
   }
   await db.query(`INSERT INTO registration_completions(proof_hash,user_sub,request_hash,retry_until)
     VALUES($1,$2,$3,clock_timestamp()+interval '10 minutes')`, [input.proofHash,input.sub,input.requestHash]);
+  await publishInitialUserAccess(db, input.sub);
   return {sub:input.sub,role,replayed:false};
 }

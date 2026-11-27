@@ -3,7 +3,7 @@ import { identityConflict } from '../identityConflicts.js';
 import { PERM_KEYS } from './catalog.js';
 import { resolveAuthz } from './index.js';
 import { appRoleLevel, effectiveAppRole } from './appRoles.js';
-import { publishRoleChanges } from './roleChanges.js';
+import { publishInitialUserAccess, publishRoleChanges } from './roleChanges.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MFA_DISABLE = 'profile.security.mfa.disable';
@@ -262,6 +262,7 @@ export async function createOrgUser(db: pg.PoolClient, actorSub: string, input: 
     throw error;
   }
   await db.query('INSERT INTO user_org_roles(user_sub,org_role_slug) VALUES($1,$2)', [input.sub, role.slug]);
+  await publishInitialUserAccess(db, input.sub);
   await writeAudit(db, actor, 'user.create', { username: input.username, org_role: role.slug },
     { sub: input.sub, label: input.displayName || input.username });
   return { sub: input.sub };
