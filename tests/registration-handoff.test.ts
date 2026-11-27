@@ -76,6 +76,7 @@ function routeFixture(options: any = {}) {
     },
     '../oidc/transactions.js': { createTxn: async (data: any) => { calls.push(['createTxn', data]); return 'synthetic-kmsi'; } },
     '../email.js': {}, '../emailTemplates.js': {},
+    '../events.js': { kickDrain: () => { calls.push(['kickDrain']); } },
     '../views.js': { renderErrorPage: (_nonce: string, data: any) => { calls.push(['errorPage', data]); return data.title; } },
     './security.js': {}, './reset.js': {}, '../audit.js': {}, '../registration.js': {}, '../rbac/roleChanges.js': {},
     '../invitations.js': {}, '../invitationMail.js': {}, '../registrationStore.js': {}, '../identityConflicts.js': {},
